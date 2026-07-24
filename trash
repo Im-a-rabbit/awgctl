@@ -1,0 +1,33 @@
+
+        macro_rules! set_options {
+            ($builder:ident, $args:ident, $($field:ident),+ $(,)?) => {
+                $(
+                    if let Some(value) = $args.$field {
+                        $builder.$field(value);
+                    }
+                )+
+            };
+        }
+        let mut builder = Interface::builder();
+        set_options!(builder, args, address, listen_port, dns, endpoint, mtu);
+pub fn resolve_ip(address: Option<Vec<IpNet>>) -> Result<Vec<IpNet>> {
+        let mut addresses: Vec<IpNet> = Vec::new();
+        for entry in fs::read_dir(CONF_DIR)? {
+            let path = entry?.path();
+            if path.extension() == Some(OsStr::new("toml")) {
+                addresses.append(&mut Self::load(&path)?.interface.address);
+            }
+        }
+        let interfaces_addresses: Vec<Addr> = NetworkInterface::show()?
+            .into_iter()
+            .flat_map(|i| i.addr)
+            .collect();
+        for addr in interfaces_addresses {
+            IpNet::new(
+                addr.ip().into(),
+                u32::from(addr.netmask()).count_ones() as u8,
+            );
+        }
+
+        Ok(addresses)
+    }
