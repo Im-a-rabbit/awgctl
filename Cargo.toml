@@ -6,12 +6,9 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-thiserror = "2.0.19"
-toml = "1.1.3"
-wireguard-conf = { git = "https://github.com/Im-a-rabbit/wireguard-conf", features = [
-  "amneziawg",
-  "serde",
-] }
+thiserror = "2"
+toml = "1"
+wireguard-conf = { version = "2", features = ["amneziawg", "serde"] }
 sudo2 = "0.2"
 serde = { version = "1", features = ["derive"] }
 time = { version = "0.3", features = [
@@ -20,3 +17,4 @@ time = { version = "0.3", features = [
   "local-offset",
 ] }
 network-interface = "2"
+qrcode = { version = "0.14" }

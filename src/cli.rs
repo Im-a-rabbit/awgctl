@@ -1,6 +1,15 @@
-use crate::server::{Result, Server};
-use clap::builder::styling::{AnsiColor, Effects, Styles};
-use clap::{Args, Parser, Subcommand};
+use crate::{
+    client::Client,
+    server::Server,
+    util::{Result, secure_write},
+};
+use clap::{
+    Args, Parser, Subcommand,
+    builder::styling::{AnsiColor, Effects, Styles},
+};
+use qrcode::render::svg;
+use qrcode::{QrCode, render::unicode};
+use std::path::PathBuf;
 use wireguard_conf::ipnet::IpNet;
 
 #[derive(Parser)]
@@ -21,13 +30,43 @@ pub struct Cli {
 
 impl Cli {
     pub fn run() -> Result<()> {
+        sudo2::escalate_if_needed()?;
         match Self::parse().command {
             Commands::New(args) => Server::new(args)?.save(),
-            Commands::Print(args) => {
-                let server = Server::new(args)?;
-                println!("{}", server.name);
-                println!("{}", toml::to_string_pretty(&server)?);
-                Ok(())
+            Commands::Add(args) => {
+                let mut server = Server::load(&args.server)?;
+                Client::new(args, &mut server)?.save()?;
+                server.save()
+            }
+            Commands::Export(args) => {
+                let client = Client::load(&args.server, &args.client)?;
+                let config = client.into_interface()?.to_string();
+
+                match (args.output, args.qr) {
+                    (Some(path), true) => {
+                        let code = QrCode::new(config.as_bytes())?
+                            .render()
+                            .min_dimensions(200, 200)
+                            .dark_color(svg::Color("#000000"))
+                            .light_color(svg::Color("#ffffff"))
+                            .build();
+                        secure_write(&path, &code)
+                    }
+                    (None, true) => {
+                        let code = QrCode::new(config.as_bytes())?
+                            .render::<unicode::Dense1x2>()
+                            .dark_color(unicode::Dense1x2::Light)
+                            .light_color(unicode::Dense1x2::Dark)
+                            .build();
+                        println!("{code}");
+                        Ok(())
+                    }
+                    (Some(path), false) => secure_write(&path, &config),
+                    (None, false) => {
+                        println!("{config}");
+                        Ok(())
+                    }
+                }
             }
         }
     }
@@ -37,7 +76,12 @@ impl Cli {
 pub enum Commands {
     /// Create a new AmneziaWG server.
     New(NewArgs),
-    Print(NewArgs),
+
+    /// Add a new peer.
+    Add(AddArgs),
+
+    /// Export a client's WireGuard configuration.
+    Export(ExportArgs),
 }
 
 #[derive(Args)]
@@ -45,20 +89,16 @@ pub struct NewArgs {
     /// Interface name.
     pub name: Option<String>,
 
-    /// Interface description.
-    #[arg(short, long)]
-    pub desc: Option<String>,
-
     /// Interface address.
     #[arg(short, long)]
     pub address: Option<Vec<IpNet>>,
 
     /// Listen port.
-    #[arg(short, long)]
+    #[arg(short = 'p', long)]
     pub listen_port: Option<u16>,
 
     /// DNS servers.
-    #[arg(short, long)]
+    #[arg(long)]
     pub dns: Option<Vec<String>>,
 
     /// Public endpoint.
@@ -68,4 +108,52 @@ pub struct NewArgs {
     /// Interface MTU.
     #[arg(long)]
     pub mtu: Option<usize>,
+}
+
+#[derive(Args)]
+pub struct AddArgs {
+    /// Server name.
+    pub server: String,
+
+    /// Client name.
+    pub client: String,
+
+    /// Client addresses.
+    #[arg(short, long)]
+    pub address: Option<Vec<IpNet>>,
+
+    /// Use the VPN as the default gateway.
+    #[arg(short, long)]
+    pub default_gateway: bool,
+
+    /// DNS servers.
+    #[arg(long)]
+    pub dns: Option<Vec<String>>,
+
+    /// Don't inherit DNS from the server.
+    #[arg(long)]
+    pub no_dns: bool,
+
+    /// Persistent keepalive.
+    #[arg(short, long)]
+    pub keepalive: Option<u16>,
+}
+
+#[derive(Args)]
+pub struct ExportArgs {
+    /// Server name.
+    pub server: String,
+
+    /// Client name.
+    pub client: String,
+
+    /// Output file path.
+    /// With -q: saves QR code as SVG.
+    /// Without -q: saves config as text.
+    #[arg(short = 'o', long = "output")]
+    pub output: Option<PathBuf>,
+
+    /// Output QR code instead of text config.
+    #[arg(short = 'q', long = "qr")]
+    pub qr: bool,
 }

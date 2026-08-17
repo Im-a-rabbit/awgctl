@@ -1,10 +1,15 @@
 mod cli;
+mod client;
 mod server;
-use cli::Cli;
+mod util;
 
-use crate::server::Result;
+use std::process::ExitCode;
 
-fn main() -> Result<()> {
-    Cli::run()?;
-    Ok(())
+fn main() -> ExitCode {
+    if let Err(e) = cli::Cli::run() {
+        eprintln!("{e}");
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
