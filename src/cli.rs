@@ -4,11 +4,13 @@ use crate::{
     util::{Result, secure_write},
 };
 use clap::{
-    Args, Parser, Subcommand,
+    Args, CommandFactory, Parser, Subcommand,
     builder::styling::{AnsiColor, Effects, Styles},
 };
+use clap_complete::Shell;
 use qrcode::render::svg;
 use qrcode::{QrCode, render::unicode};
+use std::io;
 use std::path::PathBuf;
 use wireguard_conf::ipnet::IpNet;
 
@@ -75,6 +77,11 @@ impl Cli {
                     }
                 }
             }
+            Commands::Completions(args) => {
+                let mut cmd = Self::command();
+                clap_complete::generate(args.shell, &mut cmd, "awgctl", &mut io::stdout());
+                Ok(())
+            }
         }
     }
 }
@@ -92,6 +99,9 @@ pub enum Commands {
 
     /// Export a client's WireGuard configuration.
     Export(ExportArgs),
+
+    /// Generate shell completions.
+    Completions(CompletionsArgs),
 }
 
 #[derive(Args)]
@@ -174,4 +184,10 @@ pub struct RmArgs {
     pub server: String,
     /// Client name. If provided, removes client instead of server.
     pub client: Option<String>,
+}
+
+#[derive(Args)]
+pub struct CompletionsArgs {
+    /// Shell to generate completions for.
+    pub shell: Shell,
 }

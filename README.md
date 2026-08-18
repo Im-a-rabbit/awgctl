@@ -84,6 +84,21 @@ awgctl rm awg0             # удалить сервер awg0 и все его �
 awgctl rm awg0 client1     # удалить клиента client1 из сервера awg0
 ```
 
+### completions — генерация автодополнений
+
+```
+awgctl completions <shell>
+```
+
+Поддерживаемые оболочки: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
+
+Пример:
+
+```text
+awgctl completions bash > /etc/bash_completion.d/awgctl
+awgctl completions zsh > ~/.zfunc/_awgctl
+```
+
 ## Конфигурация
 
 | Директория | Описание |
