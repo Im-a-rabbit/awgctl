@@ -210,6 +210,16 @@ impl Server {
 }
 
 impl Server {
+    /// Loads a server configuration by name from `CONF_DIR`.
+    pub fn load(name: &str) -> Result<Self> {
+        let server_path = Path::new(CONF_DIR).join(name).with_extension("toml");
+        if server_path.exists() {
+            Self::open(&server_path)
+        } else {
+            Err(AwgctlError::ServerNotFound(name.into()))
+        }
+    }
+
     /// Creates a new server with auto-resolved or user-provided configuration.
     pub fn new(args: NewArgs) -> Result<Self> {
         let (servers, used_names) = Self::scan()?;
@@ -258,11 +268,21 @@ impl Server {
         Ok(())
     }
 
-    /// Loads a server configuration by name from `CONF_DIR`.
-    pub fn load(name: &str) -> Result<Self> {
-        let server_path = Path::new(CONF_DIR).join(name).with_extension("toml");
-        if server_path.exists() {
-            Self::open(&server_path)
+    /// Removes a server and its configuration files.
+    ///
+    /// Deletes the `.toml` metadata, `.conf` WireGuard config,
+    /// and the client directory if it exists.
+    pub fn rm(name: &str) -> Result<()> {
+        let toml_path = Path::new(CONF_DIR).join(name).with_extension("toml");
+        if toml_path.exists() {
+            fs::remove_file(toml_path)?;
+            let conf_path = Path::new(WG_CONF_DIR).join(name).with_extension("conf");
+            let _ = fs::remove_file(conf_path);
+            let client_dir = Path::new(CONF_DIR).join(name);
+            if client_dir.is_dir() {
+                fs::remove_dir_all(client_dir)?;
+            }
+            Ok(())
         } else {
             Err(AwgctlError::ServerNotFound(name.into()))
         }

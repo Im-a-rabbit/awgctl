@@ -38,6 +38,13 @@ impl Cli {
                 Client::new(args, &mut server)?.save()?;
                 server.save()
             }
+            Commands::Rm(args) => {
+                if let Some(client) = args.client {
+                    Client::rm(&args.server, &client)
+                } else {
+                    Server::rm(&args.server)
+                }
+            }
             Commands::Export(args) => {
                 let client = Client::load(&args.server, &args.client)?;
                 let config = client.into_interface()?.to_string();
@@ -79,6 +86,9 @@ pub enum Commands {
 
     /// Add a new peer.
     Add(AddArgs),
+
+    /// Remove a server or client.
+    Rm(RmArgs),
 
     /// Export a client's WireGuard configuration.
     Export(ExportArgs),
@@ -156,4 +166,12 @@ pub struct ExportArgs {
     /// Output QR code instead of text config.
     #[arg(short = 'q', long = "qr")]
     pub qr: bool,
+}
+
+#[derive(Args)]
+pub struct RmArgs {
+    /// Server name.
+    pub server: String,
+    /// Client name. If provided, removes client instead of server.
+    pub client: Option<String>,
 }

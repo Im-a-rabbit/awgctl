@@ -115,6 +115,19 @@ impl Client {
 }
 
 impl Client {
+    /// Loads a client configuration by name from the server's client directory.
+    pub fn load(server_name: &str, client_name: &str) -> Result<Self> {
+        let path = Path::new(CONF_DIR)
+            .join(server_name)
+            .join(client_name)
+            .with_extension("toml");
+        if path.exists() {
+            Self::open(&path, server_name)
+        } else {
+            Err(AwgctlError::ClientNotFound(client_name.into()))
+        }
+    }
+
     /// Creates a new client peer configuration for the given server.
     pub fn new(args: AddArgs, server: &mut Server) -> Result<Self> {
         let clients = Self::scan(&args.server)?;
@@ -145,6 +158,33 @@ impl Client {
         })
     }
 
+    /// Saves the client configuration to a `.toml` file.
+    pub fn save(&self) -> Result<()> {
+        let path = Path::new(CONF_DIR)
+            .join(&self.server)
+            .join(&self.name)
+            .with_extension("toml");
+        secure_write(&path, &toml::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    /// Removes a client and its peer from the server.
+    ///
+    /// Saves the server before deleting the client file to avoid
+    /// data loss on error.
+    pub fn rm(server_name: &str, client_name: &str) -> Result<()> {
+        let client = Self::load(server_name, client_name)?;
+        let mut server = Server::load(server_name)?;
+        server.interface.peers.retain(|p| p.key != client.peer.key);
+        server.save()?;
+        let path = Path::new(CONF_DIR)
+            .join(server_name)
+            .join(client_name)
+            .with_extension("toml");
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
     /// Generate [`Interface`] from client's [`Peer`] and server's [`Interface`].
     pub fn into_interface(self) -> Result<Interface> {
         let server = Server::load(&self.server)?;
@@ -159,28 +199,5 @@ impl Client {
             interface.dns = dns;
         }
         Ok(interface)
-    }
-
-    /// Saves the client configuration to a `.toml` file.
-    pub fn save(&self) -> Result<()> {
-        let path = Path::new(CONF_DIR)
-            .join(&self.server)
-            .join(&self.name)
-            .with_extension("toml");
-        secure_write(&path, &toml::to_string_pretty(self)?)?;
-        Ok(())
-    }
-
-    /// Loads a client configuration by name from the server's client directory.
-    pub fn load(server_name: &str, client_name: &str) -> Result<Self> {
-        let path = Path::new(CONF_DIR)
-            .join(server_name)
-            .join(client_name)
-            .with_extension("toml");
-        if path.exists() {
-            Self::open(&path, server_name)
-        } else {
-            Err(AwgctlError::ClientNotFound(client_name.into()))
-        }
     }
 }
