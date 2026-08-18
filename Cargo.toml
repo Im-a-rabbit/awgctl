@@ -3,6 +3,7 @@ name = "awgctl"
 version = "0.2.0"
 description = "Manage AmneziaWG servers"
 edition = "2024"
+license = "GPL-3.0-only"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
