@@ -1,7 +1,7 @@
 use crate::{
     client::Client,
     server::Server,
-    util::{Result, secure_write},
+    util::{Listable, Result, print_table, secure_write},
 };
 use clap::{
     Args, CommandFactory, Parser, Subcommand,
@@ -12,13 +12,13 @@ use qrcode::{
     QrCode,
     render::{svg, unicode},
 };
-use std::{io, path::PathBuf};
+use std::{io, io::Write, path::PathBuf};
 use wireguard_conf::ipnet::IpNet;
 
 /// Корневая CLI-структура.
 ///
-/// Разбира аргументы командной строки и делегирует выполнение
-/// соответствующим [`Server`] или [`Client`] операциям.
+/// Разбирает аргументы командной строки и делегирует выполнение
+/// соответствующим [`Server`] или [`Client`] функциям.
 #[derive(Parser)]
 #[command(
     styles = Styles::styled()
@@ -80,6 +80,27 @@ impl Cli {
                     }
                 }
             }
+            Commands::List(args) => {
+                match args.server {
+                    Some(server_name) => {
+                        let server = Server::load(&server_name)?;
+                        let lhs = Server::headers(true);
+                        let label_width = lhs.iter().map(|h| h.len()).max().unwrap_or(0);
+
+                        let mut out = io::stdout().lock();
+                        lhs.iter().zip(server.row(true)).for_each(|(key, value)| {
+                            writeln!(out, "{:<label_width$}  {}", key, value).ok();
+                        });
+                        writeln!(out).ok();
+
+                        print_table(&Client::list(&server_name)?, args.verbose, "no clients");
+                    }
+                    None => {
+                        print_table(&Server::list()?, args.verbose, "no servers");
+                    }
+                }
+                Ok(())
+            }
             Commands::Completions(args) => {
                 let mut cmd = Self::command();
                 clap_complete::generate(args.shell, &mut cmd, "awgctl", &mut io::stdout());
@@ -103,6 +124,9 @@ pub enum Commands {
 
     /// Export a client's WireGuard configuration.
     Export(ExportArgs),
+
+    /// List servers or clients.
+    List(ListArgs),
 
     /// Generate shell completions.
     Completions(CompletionsArgs),
@@ -192,6 +216,17 @@ pub struct ExportArgs {
     /// Output QR code instead of text config.
     #[arg(short, long)]
     pub qr: bool,
+}
+
+/// Аргументы команды [`Commands::List`].
+#[derive(Args)]
+pub struct ListArgs {
+    /// Server name. If specified, lists clients for this server.
+    pub server: Option<String>,
+
+    /// Show extended output.
+    #[arg(short, long)]
+    pub verbose: bool,
 }
 
 /// Аргументы команды [`Commands::Completions`].

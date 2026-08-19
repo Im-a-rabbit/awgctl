@@ -1,6 +1,6 @@
 use qrcode::types::QrError;
 use std::{
-    fs,
+    fs, io,
     io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
@@ -11,37 +11,37 @@ use wireguard_conf::{
     prelude::*,
 };
 
-/// Directory where awgctl metadata files (`.toml`) are stored.
+/// Директория для хранения метаданных awgctl (файлы `.toml`).
 pub const CONF_DIR: &str = match option_env!("AWGCTL_CONF_DIR") {
     Some(dir) => dir,
     None => "/etc/awgctl",
 };
 
-/// Directory where AmneziaWG configuration files are stored.
+/// Директория для хранения конфигурационных файлов AmneziaWG.
 pub const WG_CONF_DIR: &str = match option_env!("AWG_CONF_DIR") {
     Some(dir) => dir,
     None => "/etc/amnezia/amneziawg",
 };
 
-/// Pre-allocated capacity for the server list.
+/// Предварительно выделенная ёмкость для списка серверов.
 pub const SERVER_CAPACITY: usize = 4;
 
-/// Pre-allocated capacity for the client list per server.
+/// Предварительно выделенная ёмкость для списка клиентов на сервер.
 pub const CLIENT_CAPACITY: usize = 8;
 
-/// First two octets of auto-assigned server subnets (10.0.X.0/24).
+/// Первые два октета автоматически назначаемых подсетей серверов (10.0.X.0/24).
 pub const SUBNET_BASE: (u8, u8) = (10, 0);
 
-/// Prefix length for auto-assigned server subnets.
+/// Длина префикса для автоматически назначаемых подсетей серверов.
 pub const SUBNET_PREFIX: u8 = 24;
 
-/// Range of ports to try when auto-assigning a listen port.
+/// Диапазон портов для попытки автоматического назначения порта прослушивания.
 pub const PORT_RANGE: std::ops::RangeInclusive<u16> = 51820..=51900;
 
-/// Errors that can occur when managing AmneziaWG servers and clients.
+/// Ошибки, которые могут возникнуть при управлении серверами и клиентами AmneziaWG.
 #[derive(Debug, Error)]
 pub enum AwgctlError {
-    // Domain errors
+    // Ошибки домена
     #[error("Invalid name '{0}': only alphanumeric, '-' and '_' allowed")]
     InvalidName(String),
 
@@ -81,7 +81,7 @@ pub enum AwgctlError {
     #[error("Client '{0}' not found")]
     ClientNotFound(String),
 
-    // External error wrappers
+    // Обёртки внешних ошибок
     #[error(transparent)]
     Sudo(#[from] Box<dyn std::error::Error>),
 
@@ -107,11 +107,11 @@ pub enum AwgctlError {
     Qr(#[from] QrError),
 }
 
-/// Convenience alias for `Result<T, AwgctlError>`.
+/// Удобный псевдоним для `Result<T, AwgctlError>`.
 pub type Result<T> = std::result::Result<T, AwgctlError>;
 
-/// Validates that a name is non-empty, ASCII alphanumeric (with `-` and `_`),
-/// and not already in use.
+/// Проверяет, что имя непустое, ASCII-алфавитно-цифровое (с `-` и `_`),
+/// и не используется.
 pub fn validate_name<I>(name: String, existing: I) -> Result<String>
 where
     I: IntoIterator,
@@ -132,16 +132,16 @@ where
     }
 }
 
-/// Checks if two networks overlap: one contains the other.
+/// Проверяет, пересекаются ли две сети: одна содержит другую.
 pub fn net_overlaps(a: &IpNet, b: &IpNet) -> bool {
     a.contains(b) || b.contains(a)
 }
 
-/// Writes `contents` to `path` atomically with `0600` permissions.
+/// Атомарно записывает `contents` в `path` с правами `0600`.
 ///
-/// Creates parent directories with `0700` permissions if needed.
-/// Writes to a temporary file first, then renames atomically.
-/// Cleans up the temporary file on error.
+/// Создаёт родительские директории с правами `0700` при необходимости.
+/// Сначала пишет во временный файл, затем атомарно переименовывает.
+/// Удаляет временный файл при ошибке.
 pub fn secure_write(path: &Path, contents: &str) -> Result<()> {
     let path = match path.parent() {
         Some(p) if p == Path::new("") => &Path::new(".").join(path),
@@ -177,4 +177,44 @@ pub fn secure_write(path: &Path, contents: &str) -> Result<()> {
 
     fs::rename(tmp, path)?;
     Ok(())
+}
+
+/// Тип, отображаемый как строка в таблице.
+///
+/// Реализуется для [`Server`](crate::server::Server) и
+/// [`Client`](crate::client::Client).
+pub trait Listable {
+    /// Заголовки столбцов, зависящие от уровня детализации.
+    fn headers(verbose: bool) -> &'static [&'static str];
+
+    /// Значения ячеек для этой строки, зависящие от уровня детализации.
+    fn row(&self, verbose: bool) -> Vec<String>;
+}
+
+/// Выводит форматированную таблицу с автоматическим расчётом ширины столбцов.
+pub fn print_table<I: Listable>(entries: &[I], verbose: bool, msg: &str) {
+    if entries.is_empty() {
+        println!("{}", msg);
+    } else {
+        let mut out = io::stdout().lock();
+        let headers: &[&str] = I::headers(verbose);
+        let rows: Vec<Vec<String>> = entries.iter().map(|e| e.row(verbose)).collect();
+        let widths: Vec<usize> = (0..headers.len())
+            .map(|i| {
+                headers[i]
+                    .len()
+                    .max(rows.iter().map(|r| r[i].len()).max().unwrap_or(0))
+            })
+            .collect();
+        for (i, h) in headers.iter().enumerate() {
+            write!(out, "{:<width$}  ", h, width = widths[i]).ok();
+        }
+        writeln!(out).ok();
+        for row in &rows {
+            for (i, cell) in row.iter().enumerate() {
+                write!(out, "{:<width$}  ", cell, width = widths[i]).ok();
+            }
+            writeln!(out).ok();
+        }
+    }
 }

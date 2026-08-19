@@ -84,6 +84,60 @@ awgctl rm awg0             # удалить сервер awg0 и все его �
 awgctl rm awg0 client1     # удалить клиента client1 из сервера awg0
 ```
 
+### list — список серверов и клиентов
+
+```
+awgctl list [server] [OPTIONS]
+```
+
+| Аргумент / Опция | Описание |
+| --- | --- |
+| `server` | Имя сервера. Если указано, список клиентов |
+| `--verbose`, `-v` | Расширенный вывод |
+
+Примеры:
+
+```text
+awgctl list                       # список серверов
+awgctl list awg0                  # список клиентов сервера awg0
+awgctl list -v                    # серверы с endpoint, DNS, MTU
+awgctl list awg0 -v               # клиенты с DNS, gateway, keepalive
+```
+
+Вывод:
+
+```text
+$ awgctl list
+Name Address     DNS
+awg0 10.0.0.1/24 —
+
+$ awgctl list -v
+Name Address     Endpoint    DNS MTU
+awg0 10.0.0.1/24 example.com —   —
+
+$ awgctl list awg0
+Name      awg0
+Address   10.0.0.1/24
+Endpoint  example.com
+DNS       —
+MTU       —
+
+Name    Address     DNS     Gateway
+client1 10.0.0.2/32 —       no
+client2 10.0.0.3/32 Inherit yes
+
+$ awgctl list awg0 -v
+Name      awg0
+Address   10.0.0.1/24
+Endpoint  example.com
+DNS       —
+MTU       —
+
+Name    Address     DNS     Gateway Keepalive
+client1 10.0.0.2/32 —       no      no
+client2 10.0.0.3/32 Inherit yes     25
+```
+
 ### completions — генерация автодополнений
 
 ```
@@ -117,6 +171,5 @@ AWG_CONF_DIR=/custom/path cargo build
 
 ## Планируется
 
-- `list` — список серверов/клиентов
 - `set` — изменение конфигурации
 - `doctor` — проверка и восстановление конфигурации

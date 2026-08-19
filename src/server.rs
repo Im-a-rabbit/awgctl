@@ -1,8 +1,8 @@
 use crate::{
     cli::NewArgs,
     util::{
-        AwgctlError, CONF_DIR, PORT_RANGE, Result, SERVER_CAPACITY, SUBNET_BASE, SUBNET_PREFIX,
-        WG_CONF_DIR, net_overlaps, secure_write, validate_name,
+        AwgctlError, CONF_DIR, Listable, PORT_RANGE, Result, SERVER_CAPACITY, SUBNET_BASE,
+        SUBNET_PREFIX, WG_CONF_DIR, net_overlaps, secure_write, validate_name,
     },
 };
 use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
@@ -37,7 +37,7 @@ pub struct Server {
 }
 
 impl Server {
-    /// Loads a server configuration by name from `CONF_DIR`.
+    /// Загружает конфигурацию сервера по имени из [`CONF_DIR`].
     pub fn load(name: &str) -> Result<Self> {
         let server_path = Path::new(CONF_DIR).join(name).with_extension("toml");
         if server_path.exists() {
@@ -47,7 +47,7 @@ impl Server {
         }
     }
 
-    /// Creates a new server with auto-resolved or user-provided configuration.
+    /// Создаёт новый сервер с автоматически определённой или указанной пользователем конфигурацией.
     pub fn new(args: NewArgs) -> Result<Self> {
         let (servers, used_names) = Self::scan()?;
         let used_addresses = servers
@@ -84,7 +84,7 @@ impl Server {
         })
     }
 
-    /// Saves the server configuration to `.toml` and `.conf` files atomically.
+    /// Атомарно сохраняет конфигурацию сервера в файлы `.toml` и `.conf`.
     pub fn save(&self) -> Result<()> {
         let toml_path = Path::new(CONF_DIR).join(&self.name).with_extension("toml");
         let conf_path = Path::new(WG_CONF_DIR)
@@ -95,10 +95,10 @@ impl Server {
         Ok(())
     }
 
-    /// Removes a server and its configuration files.
+    /// Удаляет сервер и его конфигурационные файлы.
     ///
-    /// Deletes the `.toml` metadata, `.conf` WireGuard config,
-    /// and the client directory if it exists.
+    /// Удаляет метаданные `.toml`, конфигурацию WireGuard `.conf`
+    /// и директорию клиентов, если она существует.
     pub fn rm(name: &str) -> Result<()> {
         let base = Path::new(CONF_DIR).join(name);
         let toml_path = base.with_extension("toml");
@@ -114,12 +114,58 @@ impl Server {
             Err(AwgctlError::ServerNotFound(name.into()))
         }
     }
+
+    /// Возвращает все серверы, найденные в [`CONF_DIR`].
+    pub fn list() -> Result<Vec<Self>> {
+        let mut entries = Self::scan()?.0;
+        entries.sort_by_key(|e| e.created_at);
+        Ok(entries)
+    }
+}
+
+impl Listable for Server {
+    fn headers(verbose: bool) -> &'static [&'static str] {
+        if verbose {
+            &["Name", "Address", "Endpoint", "DNS", "MTU"]
+        } else {
+            &["Name", "Address", "DNS"]
+        }
+    }
+
+    fn row(&self, verbose: bool) -> Vec<String> {
+        let address = self.interface.address.iter().map(|a| a.to_string()).fold(
+            String::new(),
+            |mut acc, s| {
+                if !acc.is_empty() {
+                    acc.push_str(", ");
+                }
+                acc.push_str(&s);
+                acc
+            },
+        );
+        let dns = if self.interface.dns.is_empty() {
+            "—".into()
+        } else {
+            self.interface.dns.join(", ")
+        };
+        if verbose {
+            vec![
+                self.name.clone(),
+                address,
+                self.interface.endpoint.as_deref().unwrap_or("—").into(),
+                dns,
+                self.interface.mtu.map_or("—".into(), |m| m.to_string()),
+            ]
+        } else {
+            vec![self.name.clone(), address, dns]
+        }
+    }
 }
 
 impl Server {
-    /// Loads a server configuration from a TOML file.
+    /// Загружает конфигурацию сервера из TOML-файла.
     ///
-    /// The server name is derived from the file stem (filename without extension).
+    /// Имя сервера определяется из имени файла без расширения.
     fn open(path: &Path) -> Result<Self> {
         let mut server: Self = toml::from_str(&fs::read_to_string(path)?)?;
         server.name = path
@@ -130,11 +176,11 @@ impl Server {
         Ok(server)
     }
 
-    /// Scans the configuration directory for servers and their names.
+    /// Сканирует директорию конфигураций на наличие серверов и их имён.
     ///
-    /// Returns a list of loaded servers and a set of all known names
-    /// (from both `.toml` and `.conf` files). Invalid `.toml` files are
-    /// skipped with a warning on stderr.
+    /// Возвращает список загруженных серверов и множество всех известных имён
+    /// (из файлов `.toml` и `.conf`). Некорректные `.toml`-файлы
+    /// пропускаются с предупреждением в stderr.
     fn scan() -> Result<(Vec<Self>, HashSet<String>)> {
         let mut servers = Vec::with_capacity(SERVER_CAPACITY);
         let mut names = HashSet::with_capacity(SERVER_CAPACITY);
@@ -172,8 +218,8 @@ impl Server {
         Ok((servers, names))
     }
 
-    /// Resolves a server name: validates user-provided name or auto-generates
-    /// the next available `awgN` name.
+    /// Определяет имя сервера: проверяет указанное пользователем имя или
+    /// автоматически генерирует следующее доступное имя `awgN`.
     fn resolve_name(name: Option<String>, existing: HashSet<String>) -> Result<String> {
         match name {
             Some(name) => validate_name(name, existing),
@@ -188,9 +234,10 @@ impl Server {
         }
     }
 
-    /// Resolves server IP addresses: validates user-provided subnets against
-    /// system and existing server addresses,
-    /// or auto-assigns from `{SUBNET_BASE.0}.{SUBNET_BASE.1}.X.0/{SUBNET_PREFIX}`.
+    /// Определяет IP-адреса сервера: проверяет указанные пользователем подсети
+    /// на пересечение с системными и существующими адресами серверов
+    /// или автоматически назначает из диапазона, определяемого
+    /// [`SUBNET_BASE`] и [`SUBNET_PREFIX`] (по умолчанию `10.0.X.0/24`).
     fn resolve_ip(
         ips: Option<Vec<IpNet>>,
         existing: impl Iterator<Item = IpNet>,
@@ -237,8 +284,8 @@ impl Server {
         }
     }
 
-    /// Resolves a listen port: validates user-provided port or finds the first
-    /// available port in `PORT_RANGE`. Checks both configuration and system availability.
+    /// Определяет порт прослушивания: проверяет указанный пользователем порт или
+    /// находит первый доступный порт в [`PORT_RANGE`]. Проверяет как конфигурацию, так и системную доступность.
     fn resolve_port(port: Option<u16>, existing: HashSet<u16>) -> Result<u16> {
         match port {
             Some(port) => {
@@ -262,8 +309,8 @@ impl Server {
         }
     }
 
-    /// Resolves the public endpoint: uses user-provided value or auto-detects
-    /// via `checkip.amazonaws.com`. Verifies the result matches a local interface.
+    /// Определяет публичный эндпоинт: использует указанное значение или
+    /// определяет автоматически через `checkip.amazonaws.com`. Проверяет, что результат совпадает с локальным интерфейсом.
     // TODO: Возможно переписать
     fn resolve_endpoint(endpoint: Option<String>, sys_addrs: &[Addr]) -> Result<String> {
         match endpoint {

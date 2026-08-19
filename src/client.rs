@@ -1,7 +1,7 @@
 use crate::{
     cli::AddArgs,
     server::Server,
-    util::{AwgctlError, CLIENT_CAPACITY, CONF_DIR, Result, secure_write, validate_name},
+    util::{AwgctlError, CLIENT_CAPACITY, CONF_DIR, Listable, Result, secure_write, validate_name},
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, ffi::OsStr, fs, net::IpAddr, path::Path};
@@ -11,7 +11,7 @@ use wireguard_conf::{ipnet::IpNet, prelude::*};
 /// Клиент AmneziaWG — peer в конфигурации сервера.
 ///
 /// Хранит метаданные (имя, дату создания), DNS-настройки и конфигурацию
-/// [`Peer`]. Сериализуется в TOML-файл в `CONF_DIR/<server>/<client>.toml`.
+/// [`Peer`]. Сериализуется в TOML-файл в [`CONF_DIR`]/<server>/<client>.toml.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Client {
     /// Client name.
@@ -38,7 +38,7 @@ pub struct Client {
 }
 
 impl Client {
-    /// Loads a client configuration by name from the server's client directory.
+    /// Загружает конфигурацию клиента по имени из директории клиентов сервера.
     pub fn load(server_name: &str, client_name: &str) -> Result<Self> {
         let path = Path::new(CONF_DIR)
             .join(server_name)
@@ -51,7 +51,7 @@ impl Client {
         }
     }
 
-    /// Creates a new client peer configuration for the given server.
+    /// Создаёт новую конфигурацию peer-клиента для указанного сервера.
     pub fn new(args: AddArgs, server: &mut Server) -> Result<Self> {
         let clients = Self::scan(&args.server)?;
 
@@ -81,7 +81,7 @@ impl Client {
         })
     }
 
-    /// Saves the client configuration to a `.toml` file.
+    /// Сохраняет конфигурацию клиента в TOML-файл.
     pub fn save(&self) -> Result<()> {
         let path = Path::new(CONF_DIR)
             .join(&self.server)
@@ -91,10 +91,10 @@ impl Client {
         Ok(())
     }
 
-    /// Removes a client and its peer from the server.
+    /// Удаляет клиента и его peer из сервера.
     ///
-    /// Saves the server before deleting the client file to avoid
-    /// data loss on error.
+    /// Сохраняет сервер перед удалением файла клиента, чтобы избежать
+    /// потери данных при ошибке.
     pub fn rm(server_name: &str, client_name: &str) -> Result<()> {
         let client = Self::load(server_name, client_name)?;
         let mut server = Server::load(server_name)?;
@@ -108,7 +108,7 @@ impl Client {
         Ok(())
     }
 
-    /// Generate [`Interface`] from client's [`Peer`] and server's [`Interface`].
+    /// Генерирует [`Interface`] из [`Peer`] клиента и [`Interface`] сервера.
     pub fn into_interface(self) -> Result<Interface> {
         let server = Server::load(&self.server)?;
         let mut interface = self.peer.to_interface(
@@ -123,12 +123,58 @@ impl Client {
         }
         Ok(interface)
     }
+
+    /// Возвращает всех клиентов для указанного сервера.
+    pub fn list(server_name: &str) -> Result<Vec<Self>> {
+        let mut entries = Self::scan(server_name)?;
+        entries.sort_by_key(|e| e.created_at);
+        Ok(entries)
+    }
+}
+
+impl Listable for Client {
+    fn headers(verbose: bool) -> &'static [&'static str] {
+        if verbose {
+            &["Name", "Address", "DNS", "Gateway", "Keepalive"]
+        } else {
+            &["Name", "Address", "DNS", "Gateway"]
+        }
+    }
+    fn row(&self, verbose: bool) -> Vec<String> {
+        let mut row = vec![
+            self.name.clone(),
+            self.peer.allowed_ips.iter().map(|a| a.to_string()).fold(
+                String::new(),
+                |mut acc, s| {
+                    if !acc.is_empty() {
+                        acc.push_str(", ");
+                    }
+                    acc.push_str(&s);
+                    acc
+                },
+            ),
+            match &self.dns {
+                Some(dns) if !dns.is_empty() => dns.join(", "),
+                Some(_) => "—".into(),
+                None => "Inherit".into(),
+            },
+            if self.default_gateway { "yes" } else { "no" }.into(),
+        ];
+        if verbose {
+            row.push(if self.peer.persistent_keepalive == 0 {
+                "no".into()
+            } else {
+                self.peer.persistent_keepalive.to_string()
+            });
+        }
+        row
+    }
 }
 
 impl Client {
-    /// Loads a client configuration from a TOML file.
+    /// Загружает конфигурацию клиента из TOML-файла.
     ///
-    /// The client name is derived from the file stem (filename without extension).
+    /// Имя клиента определяется из имени файла без расширения.
     fn open(path: &Path, server: &str) -> Result<Self> {
         let mut client: Self = toml::from_str(&fs::read_to_string(path)?)?;
         client.name = path
@@ -140,7 +186,7 @@ impl Client {
         Ok(client)
     }
 
-    /// Scans the server's client directory for existing client configurations.
+    /// Сканирует директорию клиентов сервера на наличие существующих конфигураций.
     fn scan(server_name: &str) -> Result<Vec<Self>> {
         let dir = Path::new(CONF_DIR).join(server_name);
         if !dir.exists() {
@@ -168,8 +214,9 @@ impl Client {
         Ok(clients)
     }
 
-    /// Resolves client IP addresses: validates user-provided addresses against
-    /// existing client and server addresses, or auto-assigns from the server's subnet.
+    /// Определяет IP-адреса клиента: проверяет указанные пользователем адреса
+    /// на пересечение с существующими адресами клиентов и сервера
+    /// или автоматически назначает из подсети сервера.
     fn resolve_ip(
         ips: Option<Vec<IpNet>>,
         existing: impl Iterator<Item = IpNet>,
