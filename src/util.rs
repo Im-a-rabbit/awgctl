@@ -57,6 +57,9 @@ pub enum AwgctlError {
     #[error("Address '{0}' already exists")]
     AddressAlreadyExists(IpNet),
 
+    #[error("Address '{0}' is outside the server's subnet")]
+    AddressOutsideSubnet(IpNet),
+
     #[error("Server has no configured addresses")]
     NoServerAddresses,
 

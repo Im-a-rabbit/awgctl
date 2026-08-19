@@ -216,6 +216,7 @@ impl Client {
 
     /// Определяет IP-адреса клиента: проверяет указанные пользователем адреса
     /// на пересечение с существующими адресами клиентов и сервера
+    /// на вхождение в подсеть сервера,
     /// или автоматически назначает из подсети сервера.
     fn resolve_ip(
         ips: Option<Vec<IpNet>>,
@@ -231,6 +232,11 @@ impl Client {
             Some(ips) => {
                 if let Some(&overlap) = ips.iter().find(|ua| existing.contains(&ua.addr())) {
                     Err(AwgctlError::AddressAlreadyExists(overlap))
+                } else if let Some(&bad) = ips
+                    .iter()
+                    .find(|&ua| !server_ips.iter().any(|n| n.contains(ua)))
+                {
+                    Err(AwgctlError::AddressOutsideSubnet(bad))
                 } else {
                     Ok(ips)
                 }
