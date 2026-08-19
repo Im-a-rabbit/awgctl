@@ -1,4 +1,10 @@
-use crate::{cli::NewArgs, util::*};
+use crate::{
+    cli::NewArgs,
+    util::{
+        AwgctlError, CONF_DIR, PORT_RANGE, Result, SERVER_CAPACITY, SUBNET_BASE, SUBNET_PREFIX,
+        WG_CONF_DIR, net_overlaps, secure_write, validate_name,
+    },
+};
 use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,7 +22,7 @@ use wireguard_conf::{ipnet::IpNet, prelude::*};
 /// AmneziaWG-сервер.
 ///
 /// Хранит метаданные (имя, дату создания) и конфигурацию интерфейса.
-/// Сериализуется в TOML-файл в `CONF_DIR` и в `.conf` в `WG_CONF_DIR`.
+/// Сериализуется в TOML-файл в [`CONF_DIR`] и в `.conf` в [`WG_CONF_DIR`].
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Server {
     /// Server name.
@@ -28,6 +34,86 @@ pub struct Server {
 
     /// Interface configuration.
     pub interface: Interface,
+}
+
+impl Server {
+    /// Loads a server configuration by name from `CONF_DIR`.
+    pub fn load(name: &str) -> Result<Self> {
+        let server_path = Path::new(CONF_DIR).join(name).with_extension("toml");
+        if server_path.exists() {
+            Self::open(&server_path)
+        } else {
+            Err(AwgctlError::ServerNotFound(name.into()))
+        }
+    }
+
+    /// Creates a new server with auto-resolved or user-provided configuration.
+    pub fn new(args: NewArgs) -> Result<Self> {
+        let (servers, used_names) = Self::scan()?;
+        let used_addresses = servers
+            .iter()
+            .flat_map(|s| s.interface.address.iter().cloned());
+        let sys_addrs: Vec<Addr> = NetworkInterface::show()?
+            .into_iter()
+            .flat_map(|i| i.addr)
+            .collect();
+        let used_ports: HashSet<u16> = servers
+            .iter()
+            .filter_map(|s| s.interface.listen_port)
+            .collect();
+
+        let mut builder = Interface::builder();
+        builder
+            .address(Self::resolve_ip(args.address, used_addresses, &sys_addrs)?)
+            .listen_port(Self::resolve_port(args.listen_port, used_ports)?)
+            .endpoint(Self::resolve_endpoint(args.endpoint, &sys_addrs)?)
+            // TODO: Возможно добавить обработку awgs из new. Либо через set.
+            .amnezia_settings(AmneziaWG::random_v2());
+
+        if let Some(dns) = args.dns {
+            builder.dns(dns);
+        }
+        if let Some(mtu) = args.mtu {
+            builder.mtu(mtu);
+        }
+
+        Ok(Self {
+            name: Self::resolve_name(args.name, used_names)?,
+            created_at: OffsetDateTime::now_utc(),
+            interface: builder.build(),
+        })
+    }
+
+    /// Saves the server configuration to `.toml` and `.conf` files atomically.
+    pub fn save(&self) -> Result<()> {
+        let toml_path = Path::new(CONF_DIR).join(&self.name).with_extension("toml");
+        let conf_path = Path::new(WG_CONF_DIR)
+            .join(&self.name)
+            .with_extension("conf");
+        secure_write(&toml_path, &toml::to_string_pretty(self)?)?;
+        secure_write(&conf_path, &self.interface.to_string())?;
+        Ok(())
+    }
+
+    /// Removes a server and its configuration files.
+    ///
+    /// Deletes the `.toml` metadata, `.conf` WireGuard config,
+    /// and the client directory if it exists.
+    pub fn rm(name: &str) -> Result<()> {
+        let base = Path::new(CONF_DIR).join(name);
+        let toml_path = base.with_extension("toml");
+        if toml_path.exists() {
+            fs::remove_file(toml_path)?;
+            let conf_path = Path::new(WG_CONF_DIR).join(name).with_extension("conf");
+            let _ = fs::remove_file(conf_path);
+            if base.is_dir() {
+                fs::remove_dir_all(base)?;
+            }
+            Ok(())
+        } else {
+            Err(AwgctlError::ServerNotFound(name.into()))
+        }
+    }
 }
 
 impl Server {
@@ -208,86 +294,6 @@ impl Server {
                     Err(AwgctlError::EndpointResolutionFailed)
                 }
             }
-        }
-    }
-}
-
-impl Server {
-    /// Loads a server configuration by name from `CONF_DIR`.
-    pub fn load(name: &str) -> Result<Self> {
-        let server_path = Path::new(CONF_DIR).join(name).with_extension("toml");
-        if server_path.exists() {
-            Self::open(&server_path)
-        } else {
-            Err(AwgctlError::ServerNotFound(name.into()))
-        }
-    }
-
-    /// Creates a new server with auto-resolved or user-provided configuration.
-    pub fn new(args: NewArgs) -> Result<Self> {
-        let (servers, used_names) = Self::scan()?;
-        let used_addresses = servers
-            .iter()
-            .flat_map(|s| s.interface.address.iter().cloned());
-        let sys_addrs: Vec<Addr> = NetworkInterface::show()?
-            .into_iter()
-            .flat_map(|i| i.addr.clone())
-            .collect();
-        let used_ports: HashSet<u16> = servers
-            .iter()
-            .filter_map(|s| s.interface.listen_port)
-            .collect();
-
-        let mut builder = Interface::builder();
-        builder
-            .address(Self::resolve_ip(args.address, used_addresses, &sys_addrs)?)
-            .listen_port(Self::resolve_port(args.listen_port, used_ports)?)
-            .endpoint(Self::resolve_endpoint(args.endpoint, &sys_addrs)?)
-            // TODO: Возможно добавить обработку awgs из new. Либо через set.
-            .amnezia_settings(AmneziaWG::random_v2());
-
-        if let Some(dns) = args.dns {
-            builder.dns(dns);
-        }
-        if let Some(mtu) = args.mtu {
-            builder.mtu(mtu);
-        }
-
-        Ok(Self {
-            name: Self::resolve_name(args.name, used_names)?,
-            created_at: OffsetDateTime::now_utc(),
-            interface: builder.build(),
-        })
-    }
-
-    /// Saves the server configuration to `.toml` and `.conf` files atomically.
-    pub fn save(&self) -> Result<()> {
-        let toml_path = Path::new(CONF_DIR).join(&self.name).with_extension("toml");
-        let conf_path = Path::new(WG_CONF_DIR)
-            .join(&self.name)
-            .with_extension("conf");
-        secure_write(&toml_path, &toml::to_string_pretty(self)?)?;
-        secure_write(&conf_path, &self.interface.to_string())?;
-        Ok(())
-    }
-
-    /// Removes a server and its configuration files.
-    ///
-    /// Deletes the `.toml` metadata, `.conf` WireGuard config,
-    /// and the client directory if it exists.
-    pub fn rm(name: &str) -> Result<()> {
-        let toml_path = Path::new(CONF_DIR).join(name).with_extension("toml");
-        if toml_path.exists() {
-            fs::remove_file(toml_path)?;
-            let conf_path = Path::new(WG_CONF_DIR).join(name).with_extension("conf");
-            let _ = fs::remove_file(conf_path);
-            let client_dir = Path::new(CONF_DIR).join(name);
-            if client_dir.is_dir() {
-                fs::remove_dir_all(client_dir)?;
-            }
-            Ok(())
-        } else {
-            Err(AwgctlError::ServerNotFound(name.into()))
         }
     }
 }

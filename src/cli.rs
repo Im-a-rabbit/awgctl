@@ -8,10 +8,11 @@ use clap::{
     builder::styling::{AnsiColor, Effects, Styles},
 };
 use clap_complete::Shell;
-use qrcode::render::svg;
-use qrcode::{QrCode, render::unicode};
-use std::io;
-use std::path::PathBuf;
+use qrcode::{
+    QrCode,
+    render::{svg, unicode},
+};
+use std::{io, path::PathBuf};
 use wireguard_conf::ipnet::IpNet;
 
 /// Корневая CLI-структура.
@@ -45,13 +46,10 @@ impl Cli {
                 Client::new(args, &mut server)?.save()?;
                 server.save()
             }
-            Commands::Rm(args) => {
-                if let Some(client) = args.client {
-                    Client::rm(&args.server, &client)
-                } else {
-                    Server::rm(&args.server)
-                }
-            }
+            Commands::Rm(args) => match args.client {
+                Some(client) => Client::rm(&args.server, &client),
+                None => Server::rm(&args.server),
+            },
             Commands::Export(args) => {
                 let client = Client::load(&args.server, &args.client)?;
                 let config = client.into_interface()?.to_string();
@@ -121,7 +119,7 @@ pub struct NewArgs {
     pub address: Option<Vec<IpNet>>,
 
     /// Listen port.
-    #[arg(short = 'p', long)]
+    #[arg(short = 'p', long = "port")]
     pub listen_port: Option<u16>,
 
     /// DNS servers.
@@ -167,6 +165,15 @@ pub struct AddArgs {
     pub keepalive: Option<u16>,
 }
 
+/// Аргументы команды [`Commands::Rm`].
+#[derive(Args)]
+pub struct RmArgs {
+    /// Server name.
+    pub server: String,
+    /// Client name. If provided, removes client instead of server.
+    pub client: Option<String>,
+}
+
 /// Аргументы команды [`Commands::Export`].
 #[derive(Args)]
 pub struct ExportArgs {
@@ -179,21 +186,12 @@ pub struct ExportArgs {
     /// Output file path.
     /// With -q: saves QR code as SVG.
     /// Without -q: saves config as text.
-    #[arg(short = 'o', long = "output")]
+    #[arg(short, long)]
     pub output: Option<PathBuf>,
 
     /// Output QR code instead of text config.
-    #[arg(short = 'q', long = "qr")]
+    #[arg(short, long)]
     pub qr: bool,
-}
-
-/// Аргументы команды [`Commands::Rm`].
-#[derive(Args)]
-pub struct RmArgs {
-    /// Server name.
-    pub server: String,
-    /// Client name. If provided, removes client instead of server.
-    pub client: Option<String>,
 }
 
 /// Аргументы команды [`Commands::Completions`].

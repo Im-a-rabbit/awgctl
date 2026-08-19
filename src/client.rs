@@ -4,7 +4,7 @@ use crate::{
     util::{AwgctlError, CLIENT_CAPACITY, CONF_DIR, Result, secure_write, validate_name},
 };
 use serde::{Deserialize, Serialize};
-use std::{ffi::OsStr, fs, path::Path};
+use std::{collections::HashSet, ffi::OsStr, fs, net::IpAddr, path::Path};
 use time::OffsetDateTime;
 use wireguard_conf::{ipnet::IpNet, prelude::*};
 
@@ -35,87 +35,6 @@ pub struct Client {
 
     /// WireGuard peer configuration.
     pub peer: Peer,
-}
-
-impl Client {
-    /// Loads a client configuration from a TOML file.
-    ///
-    /// The client name is derived from the file stem (filename without extension).
-    fn open(path: &Path, server: &str) -> Result<Self> {
-        let mut client: Self = toml::from_str(&fs::read_to_string(path)?)?;
-        client.name = path
-            .file_stem()
-            .and_then(OsStr::to_str)
-            .expect("path must have a file name")
-            .to_string();
-        client.server = server.to_string();
-        Ok(client)
-    }
-
-    /// Scans the server's client directory for existing client configurations.
-    fn scan(server_name: &str) -> Result<Vec<Self>> {
-        let dir = Path::new(CONF_DIR).join(server_name);
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut clients = Vec::with_capacity(CLIENT_CAPACITY);
-
-        for entry in fs::read_dir(&dir)? {
-            let path = match entry {
-                Ok(entry) => entry.path(),
-                Err(e) => {
-                    eprintln!("warning: skipping unreadable entry: {e}");
-                    continue;
-                }
-            };
-
-            if let Some("toml") = path.extension().and_then(OsStr::to_str) {
-                match Self::open(&path, server_name) {
-                    Ok(client) => clients.push(client),
-                    Err(e) => eprintln!("warning: skipping {}: {e}", path.display()),
-                }
-            }
-        }
-        Ok(clients)
-    }
-
-    /// Resolves client IP addresses: validates user-provided addresses against
-    /// existing client and server addresses, or auto-assigns from the server's subnet.
-    fn resolve_ip(
-        ips: Option<Vec<IpNet>>,
-        existing: impl Iterator<Item = IpNet>,
-        server_ips: &[IpNet],
-    ) -> Result<Vec<IpNet>> {
-        let existing: Vec<IpNet> = existing.chain(server_ips.iter().cloned()).collect();
-
-        match ips {
-            Some(ips) => {
-                if let Some(&overlap) = ips
-                    .iter()
-                    .find(|ua| existing.iter().any(|ea| ea.addr() == ua.addr()))
-                {
-                    Err(AwgctlError::AddressAlreadyExists(overlap))
-                } else {
-                    Ok(ips)
-                }
-            }
-            None => {
-                let primary = server_ips.first().ok_or(AwgctlError::NoServerAddresses)?;
-                primary
-                    .hosts()
-                    .find_map(|h| {
-                        let candidate = IpNet::new(h, primary.prefix_len()).ok()?;
-                        existing
-                            .iter()
-                            .all(|ea| ea.addr() != candidate.addr())
-                            .then_some(candidate)
-                    })
-                    .map(|ip| vec![ip])
-                    .ok_or(AwgctlError::NoAvailableAddress(*primary))
-            }
-        }
-    }
 }
 
 impl Client {
@@ -203,5 +122,80 @@ impl Client {
             interface.dns = dns;
         }
         Ok(interface)
+    }
+}
+
+impl Client {
+    /// Loads a client configuration from a TOML file.
+    ///
+    /// The client name is derived from the file stem (filename without extension).
+    fn open(path: &Path, server: &str) -> Result<Self> {
+        let mut client: Self = toml::from_str(&fs::read_to_string(path)?)?;
+        client.name = path
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .expect("path must have a file name")
+            .to_string();
+        client.server = server.to_string();
+        Ok(client)
+    }
+
+    /// Scans the server's client directory for existing client configurations.
+    fn scan(server_name: &str) -> Result<Vec<Self>> {
+        let dir = Path::new(CONF_DIR).join(server_name);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut clients = Vec::with_capacity(CLIENT_CAPACITY);
+
+        for entry in fs::read_dir(&dir)? {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(e) => {
+                    eprintln!("warning: skipping unreadable entry: {e}");
+                    continue;
+                }
+            };
+
+            if let Some("toml") = path.extension().and_then(OsStr::to_str) {
+                match Self::open(&path, server_name) {
+                    Ok(client) => clients.push(client),
+                    Err(e) => eprintln!("warning: skipping {}: {e}", path.display()),
+                }
+            }
+        }
+        Ok(clients)
+    }
+
+    /// Resolves client IP addresses: validates user-provided addresses against
+    /// existing client and server addresses, or auto-assigns from the server's subnet.
+    fn resolve_ip(
+        ips: Option<Vec<IpNet>>,
+        existing: impl Iterator<Item = IpNet>,
+        server_ips: &[IpNet],
+    ) -> Result<Vec<IpNet>> {
+        let existing: HashSet<IpAddr> = existing
+            .map(|n| n.addr())
+            .chain(server_ips.iter().map(|n| n.addr()))
+            .collect();
+
+        match ips {
+            Some(ips) => {
+                if let Some(&overlap) = ips.iter().find(|ua| existing.contains(&ua.addr())) {
+                    Err(AwgctlError::AddressAlreadyExists(overlap))
+                } else {
+                    Ok(ips)
+                }
+            }
+            None => {
+                let primary = server_ips.first().ok_or(AwgctlError::NoServerAddresses)?;
+                primary
+                    .hosts()
+                    .find(|h| !existing.contains(h))
+                    .map(|ip| vec![IpNet::new(ip, primary.prefix_len()).expect("valid IpNet")])
+                    .ok_or(AwgctlError::NoAvailableAddress(*primary))
+            }
+        }
     }
 }
