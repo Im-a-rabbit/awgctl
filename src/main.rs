@@ -1,3 +1,6 @@
+//! CLI-утилита для управления серверами и клиентами AmneziaWG.
+#![deny(missing_docs)]
+
 mod cli;
 mod client;
 mod server;

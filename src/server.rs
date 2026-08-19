@@ -13,6 +13,10 @@ use std::{
 use time::OffsetDateTime;
 use wireguard_conf::{ipnet::IpNet, prelude::*};
 
+/// AmneziaWG-сервер.
+///
+/// Хранит метаданные (имя, дату создания) и конфигурацию интерфейса.
+/// Сериализуется в TOML-файл в `CONF_DIR` и в `.conf` в `WG_CONF_DIR`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Server {
     /// Server name.
@@ -172,10 +176,9 @@ impl Server {
         }
     }
 
-    // TODO: Возможно переписать
-
     /// Resolves the public endpoint: uses user-provided value or auto-detects
     /// via `checkip.amazonaws.com`. Verifies the result matches a local interface.
+    // TODO: Возможно переписать
     fn resolve_endpoint(endpoint: Option<String>, sys_addrs: &[Addr]) -> Result<String> {
         match endpoint {
             Some(endpoint) => Ok(endpoint),

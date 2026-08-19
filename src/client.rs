@@ -8,6 +8,10 @@ use std::{ffi::OsStr, fs, path::Path};
 use time::OffsetDateTime;
 use wireguard_conf::{ipnet::IpNet, prelude::*};
 
+/// Клиент AmneziaWG — peer в конфигурации сервера.
+///
+/// Хранит метаданные (имя, дату создания), DNS-настройки и конфигурацию
+/// [`Peer`]. Сериализуется в TOML-файл в `CONF_DIR/<server>/<client>.toml`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Client {
     /// Client name.

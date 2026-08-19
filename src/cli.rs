@@ -14,6 +14,10 @@ use std::io;
 use std::path::PathBuf;
 use wireguard_conf::ipnet::IpNet;
 
+/// Корневая CLI-структура.
+///
+/// Разбира аргументы командной строки и делегирует выполнение
+/// соответствующим [`Server`] или [`Client`] операциям.
 #[derive(Parser)]
 #[command(
     styles = Styles::styled()
@@ -31,6 +35,7 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// Эскалирует привилегии через [`sudo2`] и выполняет подкоманду.
     pub fn run() -> Result<()> {
         sudo2::escalate_if_needed()?;
         match Self::parse().command {
@@ -86,6 +91,7 @@ impl Cli {
     }
 }
 
+/// Доступные подкоманды.
 #[derive(Subcommand)]
 pub enum Commands {
     /// Create a new AmneziaWG server.
@@ -104,6 +110,7 @@ pub enum Commands {
     Completions(CompletionsArgs),
 }
 
+/// Аргументы команды [`Commands::New`].
 #[derive(Args)]
 pub struct NewArgs {
     /// Interface name.
@@ -130,6 +137,7 @@ pub struct NewArgs {
     pub mtu: Option<usize>,
 }
 
+/// Аргументы команды [`Commands::Add`].
 #[derive(Args)]
 pub struct AddArgs {
     /// Server name.
@@ -159,6 +167,7 @@ pub struct AddArgs {
     pub keepalive: Option<u16>,
 }
 
+/// Аргументы команды [`Commands::Export`].
 #[derive(Args)]
 pub struct ExportArgs {
     /// Server name.
@@ -178,6 +187,7 @@ pub struct ExportArgs {
     pub qr: bool,
 }
 
+/// Аргументы команды [`Commands::Rm`].
 #[derive(Args)]
 pub struct RmArgs {
     /// Server name.
@@ -186,6 +196,7 @@ pub struct RmArgs {
     pub client: Option<String>,
 }
 
+/// Аргументы команды [`Commands::Completions`].
 #[derive(Args)]
 pub struct CompletionsArgs {
     /// Shell to generate completions for.
