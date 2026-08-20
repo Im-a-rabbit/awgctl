@@ -2,10 +2,9 @@ use crate::{
     cli::NewArgs,
     util::{
         AwgctlError, CONF_DIR, Listable, PORT_RANGE, Result, SERVER_CAPACITY, SUBNET_BASE,
-        SUBNET_PREFIX, WG_CONF_DIR, net_overlaps, secure_write, validate_name,
+        WG_CONF_DIR, get_system_addrs, secure_write, validate_ip, validate_name,
     },
 };
-use network_interface::{Addr, NetworkInterface, NetworkInterfaceConfig};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -50,13 +49,11 @@ impl Server {
     /// Создаёт новый сервер с автоматически определённой или указанной пользователем конфигурацией.
     pub fn new(args: NewArgs) -> Result<Self> {
         let (servers, used_names) = Self::scan()?;
-        let used_addresses = servers
+        let sys_addrs: Vec<IpNet> = get_system_addrs()?;
+        let used_addrs = servers
             .iter()
-            .flat_map(|s| s.interface.address.iter().cloned());
-        let sys_addrs: Vec<Addr> = NetworkInterface::show()?
-            .into_iter()
-            .flat_map(|i| i.addr)
-            .collect();
+            .flat_map(|s| s.interface.address.iter().copied())
+            .chain(sys_addrs.iter().copied());
         let used_ports: HashSet<u16> = servers
             .iter()
             .filter_map(|s| s.interface.listen_port)
@@ -64,7 +61,7 @@ impl Server {
 
         let mut builder = Interface::builder();
         builder
-            .address(Self::resolve_ip(args.address, used_addresses, &sys_addrs)?)
+            .address(Self::resolve_ip(args.address, used_addrs)?)
             .listen_port(Self::resolve_port(args.listen_port, used_ports)?)
             .endpoint(Self::resolve_endpoint(args.endpoint, &sys_addrs)?)
             // TODO: Возможно добавить обработку awgs из new. Либо через set.
@@ -237,49 +234,56 @@ impl Server {
     /// Определяет IP-адреса сервера: проверяет указанные пользователем подсети
     /// на пересечение с системными и существующими адресами серверов
     /// или автоматически назначает из диапазона, определяемого
-    /// [`SUBNET_BASE`] и [`SUBNET_PREFIX`] (по умолчанию `10.0.X.0/24`).
+    /// [`SUBNET_BASE`] (по умолчанию `10.0.X.0/24`).
     fn resolve_ip(
         ips: Option<Vec<IpNet>>,
         existing: impl Iterator<Item = IpNet>,
-        sys_used: &[Addr],
     ) -> Result<Vec<IpNet>> {
-        let existing: Vec<IpNet> = sys_used
-            .iter()
-            .filter_map(|addr| {
-                if let Some(IpAddr::V4(ipv4)) = addr.netmask() {
-                    let prefix = u32::from(ipv4).count_ones() as u8;
-                    IpNet::new(addr.ip(), prefix).ok()
-                } else {
-                    None
-                }
-            })
-            .chain(existing)
-            .collect();
+        /// Длина префикса для автоматически назначаемых подсетей серверов.
+        ///
+        /// ВАЖНО: жёстко зафиксирован на /24. Логика `resolve_ip`
+        /// завязана на это значение (один кандидат = один третий октет
+        /// SUBNET_BASE.0.SUBNET_BASE.1.X.0/24).
+        const SUBNET_PREFIX: u8 = 24;
 
         match ips {
-            Some(ips) => {
-                if let Some(&overlap) = ips
-                    .iter()
-                    .find(|&ua| existing.iter().any(|ea| net_overlaps(ua, ea)))
-                {
-                    Err(AwgctlError::SubnetAlreadyExists(overlap))
-                } else {
-                    Ok(ips)
-                }
-            }
+            Some(ips) => validate_ip(ips, existing),
             None => {
-                for subnet in 0..=255u8 {
-                    let candidate = IpNet::new(
-                        Ipv4Addr::new(SUBNET_BASE.0, SUBNET_BASE.1, subnet, 1).into(),
-                        SUBNET_PREFIX,
-                    )
-                    .expect("valid subnet");
+                let pool_start: u32 = Ipv4Addr::new(SUBNET_BASE.0, SUBNET_BASE.1, 0, 0).into();
+                let pool_end: u32 = Ipv4Addr::new(SUBNET_BASE.0, SUBNET_BASE.1, 255, 255).into();
 
-                    if existing.iter().all(|net| !net_overlaps(&candidate, net)) {
-                        return Ok(vec![candidate]);
+                let mut blocked = [false; 256];
+                for net in existing {
+                    let IpNet::V4(v4) = net else { continue };
+                    let net_start: u32 = v4.network().into();
+                    let net_end: u32 = v4.broadcast().into();
+
+                    if net_end < pool_start || net_start > pool_end {
+                        continue;
+                    }
+
+                    let lo = net_start.max(pool_start);
+                    let hi = net_end.min(pool_end);
+                    let first = ((lo - pool_start) >> 8) as u8;
+                    let last = ((hi - pool_start) >> 8) as u8;
+
+                    for subnet in first..=last {
+                        blocked[subnet as usize] = true;
                     }
                 }
-                Err(AwgctlError::NoAvailableSubnet)
+
+                blocked
+                    .iter()
+                    .position(|is_blocked| !is_blocked)
+                    .map(|subnet| {
+                        IpNet::new(
+                            Ipv4Addr::new(SUBNET_BASE.0, SUBNET_BASE.1, subnet as u8, 1).into(),
+                            SUBNET_PREFIX,
+                        )
+                        .expect("valid subnet")
+                    })
+                    .map(|net| vec![net])
+                    .ok_or(AwgctlError::NoAvailableSubnet)
             }
         }
     }
@@ -312,7 +316,7 @@ impl Server {
     /// Определяет публичный эндпоинт: использует указанное значение или
     /// определяет автоматически через `checkip.amazonaws.com`. Проверяет, что результат совпадает с локальным интерфейсом.
     // TODO: Возможно переписать
-    fn resolve_endpoint(endpoint: Option<String>, sys_addrs: &[Addr]) -> Result<String> {
+    fn resolve_endpoint(endpoint: Option<String>, sys_addrs: &[IpNet]) -> Result<String> {
         match endpoint {
             Some(endpoint) => Ok(endpoint),
             None => {
@@ -335,7 +339,7 @@ impl Server {
                 let parsed_ip: IpAddr = external_ip
                     .parse()
                     .map_err(|_| AwgctlError::EndpointResolutionFailed)?;
-                if sys_addrs.iter().any(|addr| addr.ip() == parsed_ip) {
+                if sys_addrs.iter().any(|addr| addr.addr() == parsed_ip) {
                     Ok(external_ip)
                 } else {
                     Err(AwgctlError::EndpointResolutionFailed)

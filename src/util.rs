@@ -1,7 +1,9 @@
+use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use qrcode::types::QrError;
 use std::{
-    fs, io,
-    io::Write,
+    fs,
+    io::{self, Write},
+    net::IpAddr,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
@@ -31,9 +33,6 @@ pub const CLIENT_CAPACITY: usize = 8;
 
 /// Первые два октета автоматически назначаемых подсетей серверов (10.0.X.0/24).
 pub const SUBNET_BASE: (u8, u8) = (10, 0);
-
-/// Длина префикса для автоматически назначаемых подсетей серверов.
-pub const SUBNET_PREFIX: u8 = 24;
 
 /// Диапазон портов для попытки автоматического назначения порта прослушивания.
 pub const PORT_RANGE: std::ops::RangeInclusive<u16> = 51820..=51900;
@@ -113,6 +112,21 @@ pub enum AwgctlError {
 /// Удобный псевдоним для `Result<T, AwgctlError>`.
 pub type Result<T> = std::result::Result<T, AwgctlError>;
 
+pub fn get_system_addrs() -> Result<Vec<IpNet>> {
+    Ok(NetworkInterface::show()?
+        .into_iter()
+        .flat_map(|i| i.addr)
+        .filter_map(|addr| {
+            if let Some(IpAddr::V4(ipv4)) = addr.netmask() {
+                let prefix = u32::from(ipv4).count_ones() as u8;
+                IpNet::new(addr.ip(), prefix).ok()
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
 /// Проверяет, что имя непустое, ASCII-алфавитно-цифровое (с `-` и `_`),
 /// и не используется.
 pub fn validate_name<I>(name: String, existing: I) -> Result<String>
@@ -135,9 +149,17 @@ where
     }
 }
 
-/// Проверяет, пересекаются ли две сети: одна содержит другую.
-pub fn net_overlaps(a: &IpNet, b: &IpNet) -> bool {
-    a.contains(b) || b.contains(a)
+pub fn validate_ip(ips: Vec<IpNet>, existing: impl Iterator<Item = IpNet>) -> Result<Vec<IpNet>> {
+    let existing: Vec<IpNet> = existing.collect();
+    if let Some(overlap) = {
+        ips.iter()
+            .find(|&ua| existing.iter().any(|ea| ua.contains(ea) || ea.contains(ua)))
+            .copied()
+    } {
+        Err(AwgctlError::SubnetAlreadyExists(overlap))
+    } else {
+        Ok(ips)
+    }
 }
 
 /// Атомарно записывает `contents` в `path` с правами `0600`.

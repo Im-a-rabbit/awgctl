@@ -58,9 +58,7 @@ impl Client {
         let mut builder = Peer::builder();
         builder.allowed_ips(Self::resolve_ip(
             args.address,
-            clients
-                .iter()
-                .flat_map(|c| c.peer.allowed_ips.iter().cloned()),
+            clients.iter().flat_map(|c| &c.peer.allowed_ips),
             &server.interface.address,
         )?);
 
@@ -218,28 +216,24 @@ impl Client {
     /// на пересечение с существующими адресами клиентов и сервера
     /// на вхождение в подсеть сервера,
     /// или автоматически назначает из подсети сервера.
-    fn resolve_ip(
+    fn resolve_ip<'a>(
         ips: Option<Vec<IpNet>>,
-        existing: impl Iterator<Item = IpNet>,
-        server_ips: &[IpNet],
+        existing: impl Iterator<Item = &'a IpNet>,
+        server_ips: &'a [IpNet],
     ) -> Result<Vec<IpNet>> {
-        let existing: HashSet<IpAddr> = existing
-            .map(|n| n.addr())
-            .chain(server_ips.iter().map(|n| n.addr()))
-            .collect();
+        let existing: HashSet<IpAddr> = existing.chain(server_ips).map(|n| n.addr()).collect();
 
         match ips {
             Some(ips) => {
-                if let Some(&overlap) = ips.iter().find(|ua| existing.contains(&ua.addr())) {
-                    Err(AwgctlError::AddressAlreadyExists(overlap))
-                } else if let Some(&bad) = ips
-                    .iter()
-                    .find(|&ua| !server_ips.iter().any(|n| n.contains(ua)))
-                {
-                    Err(AwgctlError::AddressOutsideSubnet(bad))
-                } else {
-                    Ok(ips)
+                for ua in &ips {
+                    if existing.contains(&ua.addr()) {
+                        return Err(AwgctlError::AddressAlreadyExists(*ua));
+                    }
+                    if !server_ips.iter().any(|n| n.contains(ua)) {
+                        return Err(AwgctlError::AddressOutsideSubnet(*ua));
+                    }
                 }
+                Ok(ips)
             }
             None => {
                 let primary = server_ips.first().ok_or(AwgctlError::NoServerAddresses)?;
