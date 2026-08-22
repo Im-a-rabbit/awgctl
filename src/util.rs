@@ -1,17 +1,14 @@
+use crate::errors::{AwgctlError, Result};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
-use qrcode::types::QrError;
 use std::{
+    collections::HashSet,
     fs,
     io::{self, Write},
     net::IpAddr,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
-use thiserror::Error;
-use wireguard_conf::{
-    ipnet::{self, IpNet},
-    prelude::*,
-};
+use wireguard_conf::ipnet::IpNet;
 
 /// Директория для хранения метаданных awgctl (файлы `.toml`).
 pub const CONF_DIR: &str = match option_env!("AWGCTL_CONF_DIR") {
@@ -31,86 +28,58 @@ pub const SERVER_CAPACITY: usize = 4;
 /// Предварительно выделенная ёмкость для списка клиентов на сервер.
 pub const CLIENT_CAPACITY: usize = 8;
 
-/// Первые два октета автоматически назначаемых подсетей серверов (10.0.X.0/24).
-pub const SUBNET_BASE: (u8, u8) = (10, 0);
+/// Первые октет автоматически назначаемых подсетей серверов (10.0.X.0/24).
+pub const FIRST_OCT: u8 = 10;
+/// Второй октет автоматически назначаемых подсетей серверов (10.0.X.0/24).
+pub const SECOND_OCT: u8 = 0;
 
 /// Диапазон портов для попытки автоматического назначения порта прослушивания.
 pub const PORT_RANGE: std::ops::RangeInclusive<u16> = 51820..=51900;
 
-/// Ошибки, которые могут возникнуть при управлении серверами и клиентами AmneziaWG.
-#[derive(Debug, Error)]
-pub enum AwgctlError {
-    // Ошибки домена
-    #[error("Invalid name '{0}': only alphanumeric, '-' and '_' allowed")]
-    InvalidName(String),
-
-    #[error("Name '{0}' already exists")]
-    NameAlreadyExists(String),
-
-    #[error("Subnet '{0}' already exists")]
-    SubnetAlreadyExists(IpNet),
-
-    #[error("No available subnet (10.0.X.0/24)")]
-    NoAvailableSubnet,
-
-    #[error("Address '{0}' already exists")]
-    AddressAlreadyExists(IpNet),
-
-    #[error("Address '{0}' is outside the server's subnet")]
-    AddressOutsideSubnet(IpNet),
-
-    #[error("Server has no configured addresses")]
-    NoServerAddresses,
-
-    #[error("No available address in subnet '{0}'")]
-    NoAvailableAddress(IpNet),
-
-    #[error("Port '{0}' already configured")]
-    PortAlreadyConfigured(u16),
-
-    #[error("Port '{0}' is already in use by another service")]
-    PortInUse(u16),
-
-    #[error("No available port ({}..={})", PORT_RANGE.start(), PORT_RANGE.end())]
-    NoAvailablePort,
-
-    #[error("Could not auto-detect a public endpoint, pass --endpoint explicitly")]
-    EndpointResolutionFailed,
-
-    #[error("Server '{0}' not found")]
-    ServerNotFound(String),
-
-    #[error("Client '{0}' not found")]
-    ClientNotFound(String),
-
-    // Обёртки внешних ошибок
-    #[error(transparent)]
-    Sudo(#[from] Box<dyn std::error::Error>),
-
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-
-    #[error(transparent)]
-    TomlDe(#[from] toml::de::Error),
-
-    #[error(transparent)]
-    TomlSer(#[from] toml::ser::Error),
-
-    #[error(transparent)]
-    Wireguard(#[from] WireguardError),
-
-    #[error(transparent)]
-    NetworkInterface(#[from] network_interface::Error),
-
-    #[error(transparent)]
-    IpNet(#[from] ipnet::PrefixLenError),
-
-    #[error(transparent)]
-    Qr(#[from] QrError),
+pub fn is_valid_dns_entry(entry: &str) -> bool {
+    if entry.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    // упрощённая проверка доменного имени: непустые метки из alphanumeric/дефисов,
+    // разделённые точками, не начинающиеся/заканчивающиеся дефисом
+    !entry.is_empty()
+        && entry.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
 }
 
-/// Удобный псевдоним для `Result<T, AwgctlError>`.
-pub type Result<T> = std::result::Result<T, AwgctlError>;
+pub fn validate_dns(dns: Vec<String>) -> Result<Vec<String>> {
+    if let Some(bad) = dns.iter().find(|d| !is_valid_dns_entry(d)) {
+        Err(AwgctlError::InvalidDnsEntry(bad.into()))
+    } else {
+        Ok(dns)
+    }
+}
+
+/// Проверяет, что имя непустое, ASCII-алфавитно-цифровое (с `-` и `_`),
+/// и не используется.
+pub fn validate_name<I>(name: String, existing: I) -> Result<String>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    if name.is_empty()
+        || name
+            .bytes()
+            .any(|c| !c.is_ascii_alphanumeric() && c != b'-' && c != b'_')
+    {
+        Err(AwgctlError::InvalidName(name))
+    } else if existing.into_iter().any(|n| n.as_ref() == name) {
+        Err(AwgctlError::NameAlreadyExists(name))
+    } else {
+        Ok(name)
+    }
+}
 
 pub fn get_system_addrs() -> Result<Vec<IpNet>> {
     Ok(NetworkInterface::show()?
@@ -127,39 +96,54 @@ pub fn get_system_addrs() -> Result<Vec<IpNet>> {
         .collect())
 }
 
-/// Проверяет, что имя непустое, ASCII-алфавитно-цифровое (с `-` и `_`),
-/// и не используется.
-pub fn validate_name<I>(name: String, existing: I) -> Result<String>
-where
-    I: IntoIterator,
-    I::Item: AsRef<str>,
-{
-    if !name.is_empty()
-        && name
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-    {
-        if existing.into_iter().any(|n| n.as_ref() == name) {
-            Err(AwgctlError::NameAlreadyExists(name))
-        } else {
-            Ok(name)
+pub fn server_validate_ip(
+    ips: Vec<IpNet>,
+    existing: impl Iterator<Item = IpNet>,
+    sys_addrs: &[IpNet],
+) -> Result<Vec<IpNet>> {
+    let existing: Vec<IpNet> = existing.collect();
+    for ua in &ips {
+        if let Some(&overlap) = existing
+            .iter()
+            .find(|&ea| ua.contains(ea) || ea.contains(ua))
+        {
+            return Err(AwgctlError::SubnetConfigured(overlap));
         }
+        if let Some(&overlap) = sys_addrs
+            .iter()
+            .find(|&ea| ua.contains(ea) || ea.contains(ua))
+        {
+            return Err(AwgctlError::SubnetInUse(overlap));
+        }
+    }
+    Ok(ips)
+}
+
+// PERF: Переписать без bind.
+pub fn server_validate_port(port: u16, existing: HashSet<u16>) -> Result<u16> {
+    if !existing.contains(&port) && std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+        Ok(port)
+    } else if existing.contains(&port) {
+        Err(AwgctlError::PortAlreadyConfigured(port))
     } else {
-        Err(AwgctlError::InvalidName(name))
+        Err(AwgctlError::PortInUse(port))
     }
 }
 
-pub fn validate_ip(ips: Vec<IpNet>, existing: impl Iterator<Item = IpNet>) -> Result<Vec<IpNet>> {
-    let existing: Vec<IpNet> = existing.collect();
-    if let Some(overlap) = {
-        ips.iter()
-            .find(|&ua| existing.iter().any(|ea| ua.contains(ea) || ea.contains(ua)))
-            .copied()
-    } {
-        Err(AwgctlError::SubnetAlreadyExists(overlap))
-    } else {
-        Ok(ips)
+pub fn client_validate_ip(
+    ips: Vec<IpNet>,
+    existing: HashSet<IpAddr>,
+    server_ips: &[IpNet],
+) -> Result<Vec<IpNet>> {
+    for ua in &ips {
+        if existing.contains(&ua.addr()) {
+            return Err(AwgctlError::AddressAlreadyExists(*ua));
+        }
+        if !server_ips.iter().any(|n| n.contains(ua)) {
+            return Err(AwgctlError::AddressOutsideSubnet(*ua));
+        }
     }
+    Ok(ips)
 }
 
 /// Атомарно записывает `contents` в `path` с правами `0600`.
@@ -168,17 +152,13 @@ pub fn validate_ip(ips: Vec<IpNet>, existing: impl Iterator<Item = IpNet>) -> Re
 /// Сначала пишет во временный файл, затем атомарно переименовывает.
 /// Удаляет временный файл при ошибке.
 pub fn secure_write(path: &Path, contents: &str) -> Result<()> {
-    let path = match path.parent() {
-        Some(p) if p == Path::new("") => &Path::new(".").join(path),
-        Some(parent) => {
-            if !parent.exists() {
-                fs::create_dir_all(parent)?;
-                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-            }
-            path
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() && !parent.exists() => {
+            fs::create_dir_all(parent)?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
         }
-        None => path,
-    };
+        _ => {}
+    }
 
     let mut tmp = path.as_os_str().to_os_string();
     tmp.push(".tmp");
@@ -221,23 +201,22 @@ pub fn print_table<I: Listable>(entries: &[I], verbose: bool, msg: &str) {
     if entries.is_empty() {
         println!("{}", msg);
     } else {
-        let mut out = io::stdout().lock();
         let headers: &[&str] = I::headers(verbose);
         let rows: Vec<Vec<String>> = entries.iter().map(|e| e.row(verbose)).collect();
-        let widths: Vec<usize> = (0..headers.len())
-            .map(|i| {
-                headers[i]
-                    .len()
-                    .max(rows.iter().map(|r| r[i].len()).max().unwrap_or(0))
-            })
-            .collect();
-        for (i, h) in headers.iter().enumerate() {
-            write!(out, "{:<width$}  ", h, width = widths[i]).ok();
+        let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+        for row in &rows {
+            for (w, cell) in widths.iter_mut().zip(row) {
+                *w = (*w).max(cell.len());
+            }
+        }
+        let mut out = io::stdout().lock();
+        for (h, w) in headers.iter().zip(&widths) {
+            write!(out, "{h:<w$}  ").ok();
         }
         writeln!(out).ok();
         for row in &rows {
-            for (i, cell) in row.iter().enumerate() {
-                write!(out, "{:<width$}  ", cell, width = widths[i]).ok();
+            for (c, w) in row.iter().zip(&widths) {
+                write!(out, "{c:<w$}  ").ok();
             }
             writeln!(out).ok();
         }

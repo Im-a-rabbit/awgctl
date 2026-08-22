@@ -3,6 +3,8 @@
 
 mod cli;
 mod client;
+mod commands;
+mod errors;
 mod server;
 mod util;
 
@@ -16,3 +18,6 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     }
 }
+// TODO: table pre_* post_* awg wireguard-conf
+// Добавить в list время?
+// Переписать комментарии

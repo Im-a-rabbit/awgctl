@@ -21,35 +21,53 @@ awgctl export awg0 client1          # вывести конфиг в stdout
 ### new — создание сервера
 
 ```
-awgctl new [name] [OPTIONS]
+awgctl new [OPTIONS] [NAME]
 ```
 
 | Опция | Описание |
 | --- | --- |
 | `--address`, `-a` | Адреса сервера (auto: `10.0.X.0/24`) |
 | `--port`, `-p` | Порт (auto: `51820-51900`) |
-| `--endpoint` | Публичный endpoint (auto: `checkip.amazonaws.com`) |
+| `--endpoint`, `-e` | Публичный endpoint (auto: `checkip.amazonaws.com`) |
 | `--dns` | DNS-серверы |
 | `--mtu` | MTU |
 
 ### add — добавление клиента
 
 ```
-awgctl add <server> <client> [OPTIONS]
+awgctl add [OPTIONS] <SERVER> <CLIENT>
 ```
 
 | Опция | Описание |
 | --- | --- |
 | `--address`, `-a` | Адреса (auto: первый свободный в подсети сервера) |
+| `--default-gateway`, `-d` | Использовать VPN как шлюз по умолчанию |
 | `--dns` | DNS-серверы (переопределяет серверные при экспорте) |
 | `--no-dns` | Не наследовать DNS от сервера |
-| `--default-gateway`, `-d` | Использовать VPN как шлюз по умолчанию |
 | `--keepalive`, `-k` | Persistent keepalive (секунды) |
+
+### rm — удаление сервера или клиента
+
+```
+awgctl rm <SERVER> [CLIENT]
+```
+
+| Аргумент | Описание |
+| --- | --- |
+| `<SERVER>` | Имя сервера |
+| `<CLIENT>` | Имя клиента. Если указано, удаляет клиента вместо сервера |
+
+Примеры:
+
+```text
+awgctl rm awg0             # удалить сервер awg0 и все его конфигурации
+awgctl rm awg0 client1     # удалить клиента client1 из сервера awg0
+```
 
 ### export — экспорт конфигурации
 
 ```
-awgctl export <server> <client> [OPTIONS]
+awgctl export [OPTIONS] <SERVER> <CLIENT>
 ```
 
 | Опция | Описание |
@@ -66,33 +84,15 @@ awgctl export <server> <client> [OPTIONS]
 | `-q` | QR-код в терминале (Dense1x2) |
 | `-o file -q` | QR-код как SVG в файл |
 
-### rm — удаление сервера или клиента
-
-```
-awgctl rm <server> [client]
-```
-
-| Аргумент | Описание |
-| --- | --- |
-| `server` | Имя сервера |
-| `client` | Имя клиента. Если указано, удаляет клиента вместо сервера |
-
-Примеры:
-
-```text
-awgctl rm awg0             # удалить сервер awg0 и все его конфигурации
-awgctl rm awg0 client1     # удалить клиента client1 из сервера awg0
-```
-
 ### list — список серверов и клиентов
 
 ```
-awgctl list [server] [OPTIONS]
+awgctl list [OPTIONS] [SERVER]
 ```
 
 | Аргумент / Опция | Описание |
 | --- | --- |
-| `server` | Имя сервера. Если указано, список клиентов |
+| `[SERVER]` | Имя сервера. Если указано, список клиентов |
 | `--verbose`, `-v` | Расширенный вывод |
 
 Примеры:
@@ -108,40 +108,42 @@ awgctl list awg0 -v               # клиенты с DNS, gateway, keepalive
 
 ```text
 $ awgctl list
-Name Address     DNS
-awg0 10.0.0.1/24 —
+Name  Address      Port   DNS
+awg0  10.0.0.1/24  51820  —
 
 $ awgctl list -v
-Name Address     Endpoint    DNS MTU
-awg0 10.0.0.1/24 example.com —   —
+Name  Address      Port   Endpoint     DNS  MTU
+awg0  10.0.0.1/24  51820  example.com  —    —
 
 $ awgctl list awg0
 Name      awg0
 Address   10.0.0.1/24
+Port      51820
 Endpoint  example.com
 DNS       —
 MTU       —
 
-Name    Address     DNS     Gateway
-client1 10.0.0.2/32 —       no
-client2 10.0.0.3/32 Inherit yes
+Name     Address      DNS      Gateway
+client1  10.0.0.2/32  —        No
+client2  10.0.0.3/32  Inherit  Yes
 
 $ awgctl list awg0 -v
 Name      awg0
 Address   10.0.0.1/24
+Port      51820
 Endpoint  example.com
 DNS       —
 MTU       —
 
-Name    Address     DNS     Gateway Keepalive
-client1 10.0.0.2/32 —       no      no
-client2 10.0.0.3/32 Inherit yes     25
+Name     Address      DNS      Gateway  Keepalive
+client1  10.0.0.2/32  —        No       No
+client2  10.0.0.3/32  Inherit  Yes      25
 ```
 
 ### completions — генерация автодополнений
 
 ```
-awgctl completions <shell>
+awgctl completions <SHELL>
 ```
 
 Поддерживаемые оболочки: `bash`, `zsh`, `fish`, `powershell`, `elvish`.
@@ -150,6 +152,7 @@ awgctl completions <shell>
 
 ```text
 awgctl completions bash > /etc/bash_completion.d/awgctl
+awgctl completions fish > ~/.config/fish/completions/awgctl.fish
 awgctl completions zsh > ~/.zfunc/_awgctl
 ```
 

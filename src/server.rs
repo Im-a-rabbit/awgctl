@@ -1,8 +1,10 @@
 use crate::{
-    cli::NewArgs,
+    commands::NewArgs,
+    errors::{AwgctlError, Result},
     util::{
-        AwgctlError, CONF_DIR, Listable, PORT_RANGE, Result, SERVER_CAPACITY, SUBNET_BASE,
-        WG_CONF_DIR, get_system_addrs, secure_write, validate_ip, validate_name,
+        CONF_DIR, FIRST_OCT, Listable, PORT_RANGE, SECOND_OCT, SERVER_CAPACITY, WG_CONF_DIR,
+        get_system_addrs, is_valid_dns_entry, secure_write, server_validate_ip,
+        server_validate_port, validate_dns, validate_name,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -10,7 +12,7 @@ use std::{
     collections::HashSet,
     ffi::OsStr,
     fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
     net::{IpAddr, Ipv4Addr, TcpStream, ToSocketAddrs},
     path::Path,
     time::Duration,
@@ -36,48 +38,33 @@ pub struct Server {
 }
 
 impl Server {
-    /// Загружает конфигурацию сервера по имени из [`CONF_DIR`].
-    pub fn load(name: &str) -> Result<Self> {
-        let server_path = Path::new(CONF_DIR).join(name).with_extension("toml");
-        if server_path.exists() {
-            Self::open(&server_path)
-        } else {
-            Err(AwgctlError::ServerNotFound(name.into()))
-        }
-    }
-
     /// Создаёт новый сервер с автоматически определённой или указанной пользователем конфигурацией.
     pub fn new(args: NewArgs) -> Result<Self> {
         let (servers, used_names) = Self::scan()?;
+
+        let name = Self::resolve_name(args.name, used_names)?;
+
         let sys_addrs: Vec<IpNet> = get_system_addrs()?;
-        let used_addrs = servers
-            .iter()
-            .flat_map(|s| s.interface.address.iter().copied())
-            .chain(sys_addrs.iter().copied());
+        let used_addrs = servers.iter().flat_map(|s| &s.interface.address);
         let used_ports: HashSet<u16> = servers
             .iter()
-            .filter_map(|s| s.interface.listen_port)
+            .map(|s| s.interface.listen_port.expect("some port"))
             .collect();
 
-        let mut builder = Interface::builder();
-        builder
-            .address(Self::resolve_ip(args.address, used_addrs)?)
+        let mut interface = Interface::builder()
+            .address(Self::resolve_ip(args.address, used_addrs, &sys_addrs)?)
             .listen_port(Self::resolve_port(args.listen_port, used_ports)?)
             .endpoint(Self::resolve_endpoint(args.endpoint, &sys_addrs)?)
+            .dns(validate_dns(args.dns)?)
             // TODO: Возможно добавить обработку awgs из new. Либо через set.
-            .amnezia_settings(AmneziaWG::random_v2());
-
-        if let Some(dns) = args.dns {
-            builder.dns(dns);
-        }
-        if let Some(mtu) = args.mtu {
-            builder.mtu(mtu);
-        }
+            .amnezia_settings(AmneziaWG::random_v2())
+            .build();
+        interface.mtu = args.mtu;
 
         Ok(Self {
-            name: Self::resolve_name(args.name, used_names)?,
+            name,
             created_at: OffsetDateTime::now_utc(),
-            interface: builder.build(),
+            interface,
         })
     }
 
@@ -92,6 +79,18 @@ impl Server {
         Ok(())
     }
 
+    /// Загружает конфигурацию сервера по имени из [`CONF_DIR`].
+    pub fn load(name: &str) -> Result<Self> {
+        let path = Path::new(CONF_DIR).join(name).with_extension("toml");
+        match Self::open(&path) {
+            Ok(s) => Ok(s),
+            Err(AwgctlError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+                Err(AwgctlError::ServerNotFound(name.into()))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Удаляет сервер и его конфигурационные файлы.
     ///
     /// Удаляет метаданные `.toml`, конфигурацию WireGuard `.conf`
@@ -99,17 +98,21 @@ impl Server {
     pub fn rm(name: &str) -> Result<()> {
         let base = Path::new(CONF_DIR).join(name);
         let toml_path = base.with_extension("toml");
-        if toml_path.exists() {
-            fs::remove_file(toml_path)?;
-            let conf_path = Path::new(WG_CONF_DIR).join(name).with_extension("conf");
-            let _ = fs::remove_file(conf_path);
-            if base.is_dir() {
-                fs::remove_dir_all(base)?;
+        match fs::remove_file(toml_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Err(AwgctlError::ServerNotFound(name.into()));
             }
-            Ok(())
-        } else {
-            Err(AwgctlError::ServerNotFound(name.into()))
+            Err(e) => return Err(e.into()),
         }
+        let conf_path = Path::new(WG_CONF_DIR).join(name).with_extension("conf");
+        if let Err(e) = fs::remove_file(&conf_path) {
+            eprintln!("warning: could not remove {}: {e}", conf_path.display());
+        }
+        if base.is_dir() {
+            fs::remove_dir_all(base)?;
+        }
+        Ok(())
     }
 
     /// Возвращает все серверы, найденные в [`CONF_DIR`].
@@ -123,23 +126,21 @@ impl Server {
 impl Listable for Server {
     fn headers(verbose: bool) -> &'static [&'static str] {
         if verbose {
-            &["Name", "Address", "Endpoint", "DNS", "MTU"]
+            &["Name", "Address", "Port", "Endpoint", "DNS", "MTU"]
         } else {
-            &["Name", "Address", "DNS"]
+            &["Name", "Address", "Port", "DNS"]
         }
     }
 
     fn row(&self, verbose: bool) -> Vec<String> {
-        let address = self.interface.address.iter().map(|a| a.to_string()).fold(
-            String::new(),
-            |mut acc, s| {
-                if !acc.is_empty() {
-                    acc.push_str(", ");
-                }
-                acc.push_str(&s);
-                acc
-            },
-        );
+        let address = self
+            .interface
+            .address
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let port = self.interface.listen_port.expect("some port").to_string();
         let dns = if self.interface.dns.is_empty() {
             "—".into()
         } else {
@@ -149,12 +150,15 @@ impl Listable for Server {
             vec![
                 self.name.clone(),
                 address,
+                port,
                 self.interface.endpoint.as_deref().unwrap_or("—").into(),
                 dns,
-                self.interface.mtu.map_or("—".into(), |m| m.to_string()),
+                self.interface
+                    .mtu
+                    .map_or_else(|| "—".into(), |m| m.to_string()),
             ]
         } else {
-            vec![self.name.clone(), address, dns]
+            vec![self.name.clone(), address, port, dns]
         }
     }
 }
@@ -170,6 +174,24 @@ impl Server {
             .and_then(OsStr::to_str)
             .expect("path must have a file name")
             .to_string();
+
+        if server.interface.address.is_empty() {
+            return Err(AwgctlError::ServerInvalid("no addresses"));
+        }
+        if server.interface.listen_port.is_none() {
+            return Err(AwgctlError::ServerInvalid("no listen port"));
+        }
+        match server.interface.endpoint.as_deref() {
+            None => return Err(AwgctlError::ServerInvalid("no endpoint")),
+            Some(e) if e.trim().is_empty() => {
+                return Err(AwgctlError::ServerInvalid("empty endpoint"));
+            }
+            _ => {}
+        }
+        if let Some(bad) = server.interface.dns.iter().find(|d| !is_valid_dns_entry(d)) {
+            return Err(AwgctlError::InvalidDnsEntry(bad.into()));
+        }
+
         Ok(server)
     }
 
@@ -178,14 +200,18 @@ impl Server {
     /// Возвращает список загруженных серверов и множество всех известных имён
     /// (из файлов `.toml` и `.conf`). Некорректные `.toml`-файлы
     /// пропускаются с предупреждением в stderr.
-    fn scan() -> Result<(Vec<Self>, HashSet<String>)> {
+    fn scan() -> Result<(Vec<Self>, Vec<String>)> {
         let mut servers = Vec::with_capacity(SERVER_CAPACITY);
-        let mut names = HashSet::with_capacity(SERVER_CAPACITY);
+        let mut names = Vec::with_capacity(SERVER_CAPACITY);
 
-        let conf_dir = Path::new(CONF_DIR);
-        let wg_dir = Path::new(WG_CONF_DIR);
-        if conf_dir.exists() && wg_dir.exists() {
-            for entry in fs::read_dir(conf_dir)?.chain(fs::read_dir(wg_dir)?) {
+        for dir in [Path::new(CONF_DIR), Path::new(WG_CONF_DIR)] {
+            let entries = match fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+
+            for entry in entries {
                 let path = match entry {
                     Ok(entry) => entry.path(),
                     Err(e) => {
@@ -197,14 +223,14 @@ impl Server {
                 match path.extension().and_then(OsStr::to_str) {
                     Some("toml") => match Self::open(&path) {
                         Ok(server) => {
-                            names.insert(server.name.clone());
+                            names.push(server.name.clone());
                             servers.push(server);
                         }
                         Err(e) => eprintln!("warning: skipping {}: {e}", path.display()),
                     },
                     Some("conf") => {
                         if let Some(stem) = path.file_stem().and_then(OsStr::to_str) {
-                            names.insert(stem.to_string());
+                            names.push(stem.to_string());
                         }
                     }
                     _ => {}
@@ -217,7 +243,7 @@ impl Server {
 
     /// Определяет имя сервера: проверяет указанное пользователем имя или
     /// автоматически генерирует следующее доступное имя `awgN`.
-    fn resolve_name(name: Option<String>, existing: HashSet<String>) -> Result<String> {
+    fn resolve_name(name: Option<String>, existing: Vec<String>) -> Result<String> {
         match name {
             Some(name) => validate_name(name, existing),
             None => {
@@ -234,79 +260,70 @@ impl Server {
     /// Определяет IP-адреса сервера: проверяет указанные пользователем подсети
     /// на пересечение с системными и существующими адресами серверов
     /// или автоматически назначает из диапазона, определяемого
-    /// [`SUBNET_BASE`] (по умолчанию `10.0.X.0/24`).
-    fn resolve_ip(
-        ips: Option<Vec<IpNet>>,
-        existing: impl Iterator<Item = IpNet>,
+    /// [`FIRST_OCT`]/[`SECOND_OCT`] (по умолчанию `10.0.X.0/24`).
+    fn resolve_ip<'a>(
+        ips: Vec<IpNet>,
+        existing: impl Iterator<Item = &'a IpNet>,
+        sys_addrs: &'a [IpNet],
     ) -> Result<Vec<IpNet>> {
         /// Длина префикса для автоматически назначаемых подсетей серверов.
         ///
         /// ВАЖНО: жёстко зафиксирован на /24. Логика `resolve_ip`
         /// завязана на это значение (один кандидат = один третий октет
-        /// SUBNET_BASE.0.SUBNET_BASE.1.X.0/24).
+        /// FIRST_OCT.SECOND_OCT.X.0/24).
         const SUBNET_PREFIX: u8 = 24;
 
-        match ips {
-            Some(ips) => validate_ip(ips, existing),
-            None => {
-                let pool_start: u32 = Ipv4Addr::new(SUBNET_BASE.0, SUBNET_BASE.1, 0, 0).into();
-                let pool_end: u32 = Ipv4Addr::new(SUBNET_BASE.0, SUBNET_BASE.1, 255, 255).into();
+        if !ips.is_empty() {
+            server_validate_ip(ips, existing.copied(), sys_addrs)
+        } else {
+            let pool_start: u32 = Ipv4Addr::new(FIRST_OCT, SECOND_OCT, 0, 0).into();
+            let pool_end: u32 = Ipv4Addr::new(FIRST_OCT, SECOND_OCT, 255, 255).into();
 
-                let mut blocked = [false; 256];
-                for net in existing {
-                    let IpNet::V4(v4) = net else { continue };
-                    let net_start: u32 = v4.network().into();
-                    let net_end: u32 = v4.broadcast().into();
+            let mut blocked = [false; 256];
+            for net in existing.chain(sys_addrs) {
+                let IpNet::V4(v4) = net else { continue };
+                let net_start: u32 = v4.network().into();
+                let net_end: u32 = v4.broadcast().into();
 
-                    if net_end < pool_start || net_start > pool_end {
-                        continue;
-                    }
-
-                    let lo = net_start.max(pool_start);
-                    let hi = net_end.min(pool_end);
-                    let first = ((lo - pool_start) >> 8) as u8;
-                    let last = ((hi - pool_start) >> 8) as u8;
-
-                    for subnet in first..=last {
-                        blocked[subnet as usize] = true;
-                    }
+                if net_end < pool_start || net_start > pool_end {
+                    continue;
                 }
 
-                blocked
-                    .iter()
-                    .position(|is_blocked| !is_blocked)
-                    .map(|subnet| {
-                        IpNet::new(
-                            Ipv4Addr::new(SUBNET_BASE.0, SUBNET_BASE.1, subnet as u8, 1).into(),
-                            SUBNET_PREFIX,
-                        )
-                        .expect("valid subnet")
-                    })
-                    .map(|net| vec![net])
-                    .ok_or(AwgctlError::NoAvailableSubnet)
+                let lo = net_start.max(pool_start);
+                let hi = net_end.min(pool_end);
+                let first = ((lo - pool_start) >> 8) as u8;
+                let last = ((hi - pool_start) >> 8) as u8;
+
+                for subnet in first..=last {
+                    blocked[subnet as usize] = true;
+                }
             }
+
+            blocked
+                .iter()
+                .position(|is_blocked| !is_blocked)
+                .map(|subnet| {
+                    IpNet::new(
+                        Ipv4Addr::new(FIRST_OCT, SECOND_OCT, subnet as u8, 1).into(),
+                        SUBNET_PREFIX,
+                    )
+                    .expect("valid subnet")
+                })
+                .map(|net| vec![net])
+                .ok_or(AwgctlError::NoAvailableSubnet)
         }
     }
 
     /// Определяет порт прослушивания: проверяет указанный пользователем порт или
     /// находит первый доступный порт в [`PORT_RANGE`]. Проверяет как конфигурацию, так и системную доступность.
+    // PERF: избавиться от bind.
     fn resolve_port(port: Option<u16>, existing: HashSet<u16>) -> Result<u16> {
         match port {
-            Some(port) => {
-                if !existing.contains(&port) && std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok()
-                {
-                    Ok(port)
-                } else if existing.contains(&port) {
-                    Err(AwgctlError::PortAlreadyConfigured(port))
-                } else {
-                    Err(AwgctlError::PortInUse(port))
-                }
-            }
+            Some(port) => server_validate_port(port, existing),
             None => PORT_RANGE
                 .into_iter()
                 .find(|port| {
                     !existing.contains(port)
-                    // TODO: избавиться от bind.
                         && std::net::UdpSocket::bind(("0.0.0.0", *port)).is_ok()
                 })
                 .ok_or(AwgctlError::NoAvailablePort),
@@ -318,7 +335,8 @@ impl Server {
     // TODO: Возможно переписать
     fn resolve_endpoint(endpoint: Option<String>, sys_addrs: &[IpNet]) -> Result<String> {
         match endpoint {
-            Some(endpoint) => Ok(endpoint),
+            Some(endpoint) if !endpoint.trim().is_empty() => Ok(endpoint),
+            Some(_) => Err(AwgctlError::EmptyEndpoint),
             None => {
                 let addr = ("checkip.amazonaws.com", 80)
                     .to_socket_addrs()?

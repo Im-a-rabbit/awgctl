@@ -1,6 +1,6 @@
 [package]
 name = "awgctl"
-version = "0.3.2"
+version = "0.3.3"
 description = "Manage AmneziaWG servers"
 edition = "2024"
 license = "GPL-3.0-only"
@@ -15,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 time = { version = "0.3", features = [
   "serde",
   "serde-human-readable",
-  "local-offset",
+  #"local-offset",
 ] }
 network-interface = "2"
 qrcode = { version = "0.14" }
